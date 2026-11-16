@@ -64,11 +64,18 @@ class TristarMpptTCPModbus {
         this.lastHoldingRegisters = [];
         this.lastStaticRegisters = new Map();
         this.staticDataLoaded = false;
+        this.staticDataStale = true;
+        this.eepromWriteVersion = 0;
         this.operation = Promise.resolve();
         this.solarFilter = new solarSnapshotFilter_1.SolarSnapshotFilter();
         this.stopping = false;
     }
     async updateTristarData(hr, config) {
+        const scaleSignature = hr.slice(0, 4).join(",");
+        if (this.scaleSignature !== undefined && this.scaleSignature !== scaleSignature) {
+            this.invalidateStaticData();
+        }
+        this.scaleSignature = scaleSignature;
         const tmd = new tristarMpptModel_1.TristarModbusData(hr, config);
         this.tristarScale = tmd.scale;
         tmd.filteredSolar = this.solarFilter.add(hr.slice(0, 4).join(","), {
@@ -84,10 +91,26 @@ class TristarMpptTCPModbus {
             }
         }
     }
-    async writeHoldingRegister(adapterConfig, command) {
-        await this.enqueue(() => this.connect(adapterConfig, async (client) => {
-            await client.writeSingleRegister(command.register, command.value);
-        }));
+    invalidateStaticData() {
+        for (const entry of Object.values(this.tristarData)) {
+            if (entry.source === "network" || entry.source === "eeprom") {
+                entry.valueOld = entry.value;
+                entry.value = null;
+                entry.initialized = false;
+                entry.rawValue = undefined;
+            }
+        }
+        this.lastStaticRegisters = new Map();
+        this.staticDataLoaded = false;
+        this.staticDataStale = true;
+    }
+    async writeHoldingRegister(adapterConfig, command, expectedScaleSignature) {
+        await this.enqueue(() => {
+            this.assertScaleSignature(expectedScaleSignature);
+            return this.connect(adapterConfig, async (client) => {
+                await client.writeSingleRegister(command.register, command.value);
+            });
+        });
     }
     async readHoldingRegister(adapterConfig) {
         try {
@@ -103,6 +126,7 @@ class TristarMpptTCPModbus {
             }));
         }
         catch (error) {
+            this.tristarScale = undefined;
             this.solarFilter.reset();
             throw error;
         }
@@ -127,25 +151,32 @@ class TristarMpptTCPModbus {
         if (this.lastHoldingRegisters.length < 92) {
             throw new Error("Read RAM scaling values before static registers");
         }
-        await this.enqueue(async () => {
-            const registers = new Map();
-            const errors = [];
-            for (const block of STATIC_REGISTER_BLOCKS) {
-                try {
-                    const values = await this.readRegisterBlock(adapterConfig, block.start, block.count);
-                    values.forEach((value, index) => registers.set(block.start + index, value));
-                }
-                catch (error) {
-                    errors.push(`0x${block.start.toString(16)}: ${error instanceof Error ? error.message : String(error)}`);
-                }
+        const writeVersion = this.eepromWriteVersion;
+        const readScaleSignature = this.scaleSignature;
+        const registers = new Map();
+        const errors = [];
+        for (const block of STATIC_REGISTER_BLOCKS) {
+            try {
+                // Only one block occupies the FIFO at a time. RAM polls and writes
+                // can be interleaved between blocks instead of waiting for all blocks.
+                const values = await this.enqueue(() => this.readRegisterBlock(adapterConfig, block.start, block.count));
+                values.forEach((value, index) => registers.set(block.start + index, value));
             }
-            this.lastStaticRegisters = registers;
-            errors.push(...this.updateStaticData(registers, adapterConfig));
-            this.staticDataLoaded = errors.length === 0;
-            if (errors.length > 0) {
-                throw new Error(`Some static register blocks are unavailable: ${errors.join("; ")}`);
+            catch (error) {
+                errors.push(`0x${block.start.toString(16)}: ${error instanceof Error ? error.message : String(error)}`);
             }
-        });
+        }
+        if (writeVersion !== this.eepromWriteVersion || readScaleSignature !== this.scaleSignature) {
+            this.staticDataStale = true;
+            throw new Error("EEPROM or scaling changed during static refresh; discard mixed snapshot and refresh again");
+        }
+        this.lastStaticRegisters = registers;
+        errors.push(...this.updateStaticData(registers, adapterConfig));
+        this.staticDataLoaded = errors.length === 0;
+        this.staticDataStale = false;
+        if (errors.length > 0) {
+            throw new Error(`Some static register blocks are unavailable: ${errors.join("; ")}`);
+        }
     }
     updateStaticData(registers, config) {
         const tmd = new tristarMpptModel_1.TristarModbusData(this.lastHoldingRegisters, config, null, registers);
@@ -159,6 +190,7 @@ class TristarMpptTCPModbus {
                     entry.initialized = true;
                 }
                 catch (error) {
+                    entry.value = null;
                     entry.initialized = false;
                     entry.rawValue = undefined;
                     errors.push(`${entry.descr}: ${error instanceof Error ? error.message : String(error)}`);
@@ -182,28 +214,41 @@ class TristarMpptTCPModbus {
         });
         return result;
     }
-    async writeEepromRegister(adapterConfig, command, expectedRaw) {
+    async writeEepromRegister(adapterConfig, command, expectedRaw, expectedScaleSignature) {
         await this.enqueue(async () => {
-            const before = await this.readRegisterBlock(adapterConfig, command.register, 1);
-            if (before[0] !== expectedRaw) {
-                throw new Error(`EEPROM value at 0x${command.register.toString(16)} changed; refresh and review before writing`);
-            }
-            // Exactly one write. No automatic retry, clear-faults or controller reset.
-            await this.connect(adapterConfig, async (client) => {
-                await client.writeSingleRegister(command.register, command.value);
-            });
-            let after;
+            this.assertScaleSignature(expectedScaleSignature);
+            let writePossiblySent = false;
             try {
-                after = await this.readRegisterBlock(adapterConfig, command.register, 1);
+                const before = await this.readRegisterBlock(adapterConfig, command.register, 1);
+                if (before[0] !== expectedRaw) {
+                    throw new Error(`EEPROM value at 0x${command.register.toString(16)} changed; refresh and review before writing`);
+                }
+                // Exactly one write. No automatic retry, clear-faults or controller reset.
+                await this.connect(adapterConfig, async (client) => {
+                    writePossiblySent = true;
+                    await client.writeSingleRegister(command.register, command.value);
+                });
+                let after;
+                try {
+                    after = await this.readRegisterBlock(adapterConfig, command.register, 1);
+                }
+                catch (error) {
+                    throw new Error(`EEPROM write was sent but readback failed; do not retry blindly: ${error instanceof Error ? error.message : String(error)}`);
+                }
+                if (after[0] !== command.value) {
+                    throw new Error(`EEPROM readback mismatch at 0x${command.register.toString(16)}: wrote ${command.value}, read ${after[0]}`);
+                }
+                this.lastStaticRegisters.set(command.register, after[0]);
+                this.updateStaticData(this.lastStaticRegisters, adapterConfig);
             }
-            catch (error) {
-                throw new Error(`EEPROM write was sent but readback failed; do not retry blindly: ${error instanceof Error ? error.message : String(error)}`);
+            finally {
+                if (writePossiblySent) {
+                    // Even a lost response or failed readback may leave the device changed.
+                    // Invalidate any concurrently collected mixed static snapshot.
+                    this.eepromWriteVersion++;
+                    this.staticDataStale = true;
+                }
             }
-            if (after[0] !== command.value) {
-                throw new Error(`EEPROM readback mismatch at 0x${command.register.toString(16)}: wrote ${command.value}, read ${after[0]}`);
-            }
-            this.lastStaticRegisters.set(command.register, after[0]);
-            this.updateStaticData(this.lastStaticRegisters, adapterConfig);
         });
     }
     async writeCoil(adapterConfig, command) {
@@ -218,8 +263,13 @@ class TristarMpptTCPModbus {
             }
             return task();
         });
-        this.operation = result.catch(() => undefined);
+        this.operation = result.then(() => undefined, () => undefined);
         return result;
+    }
+    assertScaleSignature(expected) {
+        if (!this.tristarScale || this.scaleSignature !== expected) {
+            throw new Error("Scaling values changed or are invalid; discard command without hardware write");
+        }
     }
     async connect(adapterConfig, callback) {
         if (this.stopping) {

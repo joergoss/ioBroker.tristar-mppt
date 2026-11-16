@@ -20,6 +20,10 @@ export class TristarMppt extends utils.Adapter {
 	private activeUpdate: Promise<void> | undefined;
 	private nextStaticRead = 0;
 	private nextCoilRead = 0;
+	private unloaded = false;
+	private staticReadPromise: Promise<void> | undefined;
+	private coilReadPromise: Promise<void> | undefined;
+	private readonly stateWriteQueues = new Map<string, Promise<void>>();
 	private readonly lastStateValues = new Map<string, TristarPropertyType>();
 
 	public constructor(options: Partial<utils.AdapterOptions> = {}) {
@@ -33,8 +37,17 @@ export class TristarMppt extends utils.Adapter {
 	}
 
 	private async onReady(): Promise<void> {
+		if (this.unloaded) {
+			return;
+		}
 		await this.initObjects();
+		if (this.unloaded) {
+			return;
+		}
 		await this.setConnectionState(false);
+		if (this.unloaded) {
+			return;
+		}
 
 		try {
 			validateConfig(this.config);
@@ -43,6 +56,9 @@ export class TristarMppt extends utils.Adapter {
 			return;
 		}
 
+		if (this.unloaded) {
+			return;
+		}
 		if (this.config.enableControlWrites) {
 			this.subscribeStates("control.*");
 		}
@@ -139,54 +155,98 @@ export class TristarMppt extends utils.Adapter {
 		this.log.debug(`Raw holding registers: ${JSON.stringify(this.tristar.lastHoldingRegisters)}`);
 		await this.safeSetConnectionState(true);
 
-		if (Date.now() >= this.nextStaticRead) {
-			try {
-				await this.tristar.readStaticRegisters(this.config);
-				this.nextStaticRead = Date.now() + STATIC_READ_INTERVAL_MS;
-			} catch (error) {
-				this.nextStaticRead = Date.now() + 60_000;
-				this.log.error(`Could not read static TriStar registers: ${this.errorText(error)}`);
-			}
-			if (!this.mainLoopRunning) {
-				return;
-			}
-		}
-
-		if (Date.now() >= this.nextCoilRead) {
-			try {
-				await this.tristar.readCoilStates(this.config);
-				this.nextCoilRead = Date.now() + COIL_READ_INTERVAL_MS;
-			} catch (error) {
-				this.nextCoilRead = Date.now() + 60_000;
-				this.log.error(`Could not read TriStar coil states: ${this.errorText(error)}`);
-			}
-			if (!this.mainLoopRunning) {
-				return;
-			}
-		}
-
+		// Publish fresh RAM values before optional background work. Static and
+		// coil refreshes must never delay this poll.
 		for (const [key, entry] of Object.entries(this.tristar.tristarData)) {
 			if (!this.mainLoopRunning) {
 				return;
 			}
-			if ((!entry.readRegister && !entry.readCoil) || entry.initialized === false) {
+			if (!entry.readRegister && !entry.readCoil) {
 				continue;
 			}
-			if (!this.lastStateValues.has(key) || this.lastStateValues.get(key) !== entry.value) {
+			const value = entry.value;
+			if (!this.lastStateValues.has(key) || this.lastStateValues.get(key) !== value) {
 				try {
-					this.log.debug(`${key}: ${JSON.stringify(entry.value)}`);
-					await this.setStateAsync(key, { val: entry.value, ack: true });
-					this.lastStateValues.set(key, entry.value);
+					this.log.debug(`${key}: ${JSON.stringify(value)}`);
+					await this.writeState(key, { val: value, ack: true });
+					this.lastStateValues.set(key, value);
 				} catch (error) {
 					this.log.error(`Could not publish ${key}: ${this.errorText(error)}`);
 				}
 			}
 		}
+
+		if (this.mainLoopRunning && (this.tristar.staticDataStale || Date.now() >= this.nextStaticRead)) {
+			this.refreshStaticRegisters();
+		}
+		if (this.mainLoopRunning && Date.now() >= this.nextCoilRead) {
+			this.refreshCoilStates();
+		}
+	}
+
+	private refreshStaticRegisters(): void {
+		if (this.staticReadPromise) {
+			return;
+		}
+		const refresh = this.tristar.readStaticRegisters(this.config);
+		this.staticReadPromise = refresh;
+		const clear = (): void => {
+			if (this.staticReadPromise === refresh) {
+				this.staticReadPromise = undefined;
+			}
+		};
+		void refresh.then(() => {
+			clear();
+			this.nextStaticRead = Date.now() + STATIC_READ_INTERVAL_MS;
+		}, error => {
+			clear();
+			if (this.mainLoopRunning) {
+				this.nextStaticRead = Date.now() + 60_000;
+				this.log.error(`Could not read static TriStar registers: ${this.errorText(error)}`);
+			}
+		});
+	}
+
+	private refreshCoilStates(): void {
+		if (this.coilReadPromise) {
+			return;
+		}
+		const refresh = this.tristar.readCoilStates(this.config);
+		this.coilReadPromise = refresh;
+		const clear = (): void => {
+			if (this.coilReadPromise === refresh) {
+				this.coilReadPromise = undefined;
+			}
+		};
+		void refresh.then(() => {
+			clear();
+			this.nextCoilRead = Date.now() + COIL_READ_INTERVAL_MS;
+		}, error => {
+			clear();
+			if (this.mainLoopRunning) {
+				this.nextCoilRead = Date.now() + 60_000;
+				this.log.error(`Could not read TriStar coil states: ${this.errorText(error)}`);
+			}
+		});
+	}
+
+	private writeState(key: string, state: { val: ioBroker.StateValue; ack: boolean }): Promise<void> {
+		const previous = this.stateWriteQueues.get(key) ?? Promise.resolve();
+		const write = previous.catch(() => undefined).then(() => this.setStateAsync(key, state));
+		const result = write.then(() => undefined);
+		const tracked = result.then(() => undefined, () => undefined);
+		this.stateWriteQueues.set(key, tracked);
+		void tracked.then(() => {
+			if (this.stateWriteQueues.get(key) === tracked) {
+				this.stateWriteQueues.delete(key);
+			}
+		});
+		return result;
 	}
 
 	private async setConnectionState(connected: boolean): Promise<void> {
 		if (this.connectionState !== connected) {
-			await this.setStateAsync("info.connection", { val: connected, ack: true });
+			await this.writeState("info.connection", { val: connected, ack: true });
 			this.connectionState = connected;
 		}
 	}
@@ -200,6 +260,7 @@ export class TristarMppt extends utils.Adapter {
 	}
 
 	private onUnload(callback: () => void): void {
+		this.unloaded = true;
 		this.mainLoopRunning = false;
 		if (this.timeoutRef) {
 			clearTimeout(this.timeoutRef);
@@ -271,9 +332,10 @@ export class TristarMppt extends utils.Adapter {
 				if (typeof state.val !== "number" || !Number.isFinite(state.val)) {
 					throw new Error("Control value must be a finite number");
 				}
-				if (!this.tristar.tristarScale) {
+				if (!this.tristar.tristarScale || !this.tristar.scaleSignature) {
 					throw new Error("Scaling values are not available yet; wait for a successful poll");
 				}
+				const scaleSignature = this.tristar.scaleSignature;
 				const writeData: TristarWriteData = { value: state.val, scale: this.tristar.tristarScale };
 				const command = entry.writeRegister(writeData);
 				if (entry.source === "eeprom") {
@@ -284,13 +346,14 @@ export class TristarMppt extends utils.Adapter {
 						throw new Error("EEPROM value has not been read yet; wait for the static register refresh");
 					}
 					const previousRaw = entry.rawValue;
-					await this.tristar.writeEepromRegister(this.config, command, previousRaw);
-					await this.setStateAsync(key, { val: entry.value, ack: true });
-					this.lastStateValues.set(key, entry.value);
+					await this.tristar.writeEepromRegister(this.config, command, previousRaw, scaleSignature);
+					const verifiedValue = entry.value;
+					await this.writeState(key, { val: verifiedValue, ack: true });
+					this.lastStateValues.set(key, verifiedValue);
 					this.log.info(`EEPROM ${key}: raw ${previousRaw} -> ${command.value}, readback verified; controller reset is required to clear the EEPROM-changed fault`);
 				} else {
-					await this.tristar.writeHoldingRegister(this.config, command);
-					await this.setStateAsync(key, { val: state.val, ack: true });
+					await this.tristar.writeHoldingRegister(this.config, command, scaleSignature);
+					await this.writeState(key, { val: state.val, ack: true });
 				}
 				return;
 			}
@@ -300,12 +363,12 @@ export class TristarMppt extends utils.Adapter {
 					throw new Error("Coil command must be boolean");
 				}
 				if (!state.val) {
-					await this.setStateAsync(key, { val: false, ack: true });
+					await this.writeState(key, { val: false, ack: true });
 					return;
 				}
 				const command = entry.writeCoil({ value: true, scale: this.tristar.tristarScale! });
 				await this.tristar.writeCoil(this.config, command);
-				await this.setStateAsync(key, { val: false, ack: true });
+				await this.writeState(key, { val: false, ack: true });
 				return;
 			}
 			this.log.warn(`Ignoring write to read-only state ${key}`);

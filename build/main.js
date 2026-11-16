@@ -53,19 +53,33 @@ class TristarMppt extends utils.Adapter {
         this.mainLoopRunning = false;
         this.nextStaticRead = 0;
         this.nextCoilRead = 0;
+        this.unloaded = false;
+        this.stateWriteQueues = new Map();
         this.lastStateValues = new Map();
         this.on("ready", this.onReady.bind(this));
         this.on("stateChange", this.onStateChange.bind(this));
         this.on("unload", this.onUnload.bind(this));
     }
     async onReady() {
+        if (this.unloaded) {
+            return;
+        }
         await this.initObjects();
+        if (this.unloaded) {
+            return;
+        }
         await this.setConnectionState(false);
+        if (this.unloaded) {
+            return;
+        }
         try {
             (0, config_1.validateConfig)(this.config);
         }
         catch (error) {
             this.log.error(`Invalid configuration: ${this.errorText(error)}`);
+            return;
+        }
+        if (this.unloaded) {
             return;
         }
         if (this.config.enableControlWrites) {
@@ -156,54 +170,95 @@ class TristarMppt extends utils.Adapter {
         }
         this.log.debug(`Raw holding registers: ${JSON.stringify(this.tristar.lastHoldingRegisters)}`);
         await this.safeSetConnectionState(true);
-        if (Date.now() >= this.nextStaticRead) {
-            try {
-                await this.tristar.readStaticRegisters(this.config);
-                this.nextStaticRead = Date.now() + STATIC_READ_INTERVAL_MS;
-            }
-            catch (error) {
-                this.nextStaticRead = Date.now() + 60000;
-                this.log.error(`Could not read static TriStar registers: ${this.errorText(error)}`);
-            }
-            if (!this.mainLoopRunning) {
-                return;
-            }
-        }
-        if (Date.now() >= this.nextCoilRead) {
-            try {
-                await this.tristar.readCoilStates(this.config);
-                this.nextCoilRead = Date.now() + COIL_READ_INTERVAL_MS;
-            }
-            catch (error) {
-                this.nextCoilRead = Date.now() + 60000;
-                this.log.error(`Could not read TriStar coil states: ${this.errorText(error)}`);
-            }
-            if (!this.mainLoopRunning) {
-                return;
-            }
-        }
+        // Publish fresh RAM values before optional background work. Static and
+        // coil refreshes must never delay this poll.
         for (const [key, entry] of Object.entries(this.tristar.tristarData)) {
             if (!this.mainLoopRunning) {
                 return;
             }
-            if ((!entry.readRegister && !entry.readCoil) || entry.initialized === false) {
+            if (!entry.readRegister && !entry.readCoil) {
                 continue;
             }
-            if (!this.lastStateValues.has(key) || this.lastStateValues.get(key) !== entry.value) {
+            const value = entry.value;
+            if (!this.lastStateValues.has(key) || this.lastStateValues.get(key) !== value) {
                 try {
-                    this.log.debug(`${key}: ${JSON.stringify(entry.value)}`);
-                    await this.setStateAsync(key, { val: entry.value, ack: true });
-                    this.lastStateValues.set(key, entry.value);
+                    this.log.debug(`${key}: ${JSON.stringify(value)}`);
+                    await this.writeState(key, { val: value, ack: true });
+                    this.lastStateValues.set(key, value);
                 }
                 catch (error) {
                     this.log.error(`Could not publish ${key}: ${this.errorText(error)}`);
                 }
             }
         }
+        if (this.mainLoopRunning && (this.tristar.staticDataStale || Date.now() >= this.nextStaticRead)) {
+            this.refreshStaticRegisters();
+        }
+        if (this.mainLoopRunning && Date.now() >= this.nextCoilRead) {
+            this.refreshCoilStates();
+        }
+    }
+    refreshStaticRegisters() {
+        if (this.staticReadPromise) {
+            return;
+        }
+        const refresh = this.tristar.readStaticRegisters(this.config);
+        this.staticReadPromise = refresh;
+        const clear = () => {
+            if (this.staticReadPromise === refresh) {
+                this.staticReadPromise = undefined;
+            }
+        };
+        void refresh.then(() => {
+            clear();
+            this.nextStaticRead = Date.now() + STATIC_READ_INTERVAL_MS;
+        }, error => {
+            clear();
+            if (this.mainLoopRunning) {
+                this.nextStaticRead = Date.now() + 60000;
+                this.log.error(`Could not read static TriStar registers: ${this.errorText(error)}`);
+            }
+        });
+    }
+    refreshCoilStates() {
+        if (this.coilReadPromise) {
+            return;
+        }
+        const refresh = this.tristar.readCoilStates(this.config);
+        this.coilReadPromise = refresh;
+        const clear = () => {
+            if (this.coilReadPromise === refresh) {
+                this.coilReadPromise = undefined;
+            }
+        };
+        void refresh.then(() => {
+            clear();
+            this.nextCoilRead = Date.now() + COIL_READ_INTERVAL_MS;
+        }, error => {
+            clear();
+            if (this.mainLoopRunning) {
+                this.nextCoilRead = Date.now() + 60000;
+                this.log.error(`Could not read TriStar coil states: ${this.errorText(error)}`);
+            }
+        });
+    }
+    writeState(key, state) {
+        var _a;
+        const previous = (_a = this.stateWriteQueues.get(key)) !== null && _a !== void 0 ? _a : Promise.resolve();
+        const write = previous.catch(() => undefined).then(() => this.setStateAsync(key, state));
+        const result = write.then(() => undefined);
+        const tracked = result.then(() => undefined, () => undefined);
+        this.stateWriteQueues.set(key, tracked);
+        void tracked.then(() => {
+            if (this.stateWriteQueues.get(key) === tracked) {
+                this.stateWriteQueues.delete(key);
+            }
+        });
+        return result;
     }
     async setConnectionState(connected) {
         if (this.connectionState !== connected) {
-            await this.setStateAsync("info.connection", { val: connected, ack: true });
+            await this.writeState("info.connection", { val: connected, ack: true });
             this.connectionState = connected;
         }
     }
@@ -216,6 +271,7 @@ class TristarMppt extends utils.Adapter {
         }
     }
     onUnload(callback) {
+        this.unloaded = true;
         this.mainLoopRunning = false;
         if (this.timeoutRef) {
             clearTimeout(this.timeoutRef);
@@ -282,9 +338,10 @@ class TristarMppt extends utils.Adapter {
                 if (typeof state.val !== "number" || !Number.isFinite(state.val)) {
                     throw new Error("Control value must be a finite number");
                 }
-                if (!this.tristar.tristarScale) {
+                if (!this.tristar.tristarScale || !this.tristar.scaleSignature) {
                     throw new Error("Scaling values are not available yet; wait for a successful poll");
                 }
+                const scaleSignature = this.tristar.scaleSignature;
                 const writeData = { value: state.val, scale: this.tristar.tristarScale };
                 const command = entry.writeRegister(writeData);
                 if (entry.source === "eeprom") {
@@ -295,14 +352,15 @@ class TristarMppt extends utils.Adapter {
                         throw new Error("EEPROM value has not been read yet; wait for the static register refresh");
                     }
                     const previousRaw = entry.rawValue;
-                    await this.tristar.writeEepromRegister(this.config, command, previousRaw);
-                    await this.setStateAsync(key, { val: entry.value, ack: true });
-                    this.lastStateValues.set(key, entry.value);
+                    await this.tristar.writeEepromRegister(this.config, command, previousRaw, scaleSignature);
+                    const verifiedValue = entry.value;
+                    await this.writeState(key, { val: verifiedValue, ack: true });
+                    this.lastStateValues.set(key, verifiedValue);
                     this.log.info(`EEPROM ${key}: raw ${previousRaw} -> ${command.value}, readback verified; controller reset is required to clear the EEPROM-changed fault`);
                 }
                 else {
-                    await this.tristar.writeHoldingRegister(this.config, command);
-                    await this.setStateAsync(key, { val: state.val, ack: true });
+                    await this.tristar.writeHoldingRegister(this.config, command, scaleSignature);
+                    await this.writeState(key, { val: state.val, ack: true });
                 }
                 return;
             }
@@ -311,12 +369,12 @@ class TristarMppt extends utils.Adapter {
                     throw new Error("Coil command must be boolean");
                 }
                 if (!state.val) {
-                    await this.setStateAsync(key, { val: false, ack: true });
+                    await this.writeState(key, { val: false, ack: true });
                     return;
                 }
                 const command = entry.writeCoil({ value: true, scale: this.tristar.tristarScale });
                 await this.tristar.writeCoil(this.config, command);
-                await this.setStateAsync(key, { val: false, ack: true });
+                await this.writeState(key, { val: false, ack: true });
                 return;
             }
             this.log.warn(`Ignoring write to read-only state ${key}`);
