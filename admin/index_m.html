@@ -20,9 +20,14 @@
 			$('.value').each(function () {
 				var $key = $(this);
 				var id = $key.attr('id');
-				$key.val(settings[id])
-					.on('change', () => onChange())
-					.on('keyup', () => onChange());
+				if ($key.attr('type') === 'checkbox') {
+					$key.prop('checked', settings[id] === true)
+						.on('change', () => onChange());
+				} else {
+					$key.val(settings[id])
+						.on('change', () => onChange())
+						.on('keyup', () => onChange());
+				}
 			});
 			onChange(false);
 			if (M) M.updateTextFields();
@@ -32,7 +37,9 @@
 			var obj = {};
 			$('.value').each(function () {
 				var $this = $(this);
-				if ($this.attr('type') === 'number') {
+				if ($this.attr('type') === 'checkbox') {
+					obj[$this.attr('id')] = $this.prop('checked');
+				} else if ($this.attr('type') === 'number') {
 					obj[$this.attr('id')] = parseFloat($this.val());
 				} else {
 					obj[$this.attr('id')] = $this.val();
@@ -75,6 +82,26 @@
 				<input type="number" class="value" id="installedWP" min="0" step="1" required />
 				<label for="installedWP" class="translate">Installed solar power in Wp</label>
 				<span class="helper-text translate">Use 0 to disable the power percentage</span>
+			</div>
+		</div>
+
+		<div class="row">
+			<div class="col s12">
+				<label>
+					<input type="checkbox" class="value" id="enableControlWrites" />
+					<span class="translate">Allow RAM control and coil commands</span>
+				</label>
+				<p class="translate">Enables slave-control, fixed array targets, clear commands and controller reset. Disabled by default.</p>
+			</div>
+		</div>
+
+		<div class="row">
+			<div class="col s12">
+				<label>
+					<input type="checkbox" class="value" id="enableEepromWrites" />
+					<span class="translate">Allow guarded EEPROM charging writes</span>
+				</label>
+				<p class="translate">EEPROM writes can damage batteries, cause an EEPROM-changed fault and require a manual controller reset. Never enabled by default.</p>
 			</div>
 		</div>
 	</div>
