@@ -28,5 +28,7 @@ function validateConfig(config) {
     config.unitId = unitId;
     config.interval = interval;
     config.installedWP = installedWP;
+    config.enableControlWrites = config.enableControlWrites === true;
+    config.enableEepromWrites = config.enableEepromWrites === true;
 }
 //# sourceMappingURL=config.js.map

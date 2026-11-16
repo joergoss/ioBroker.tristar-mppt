@@ -41,6 +41,8 @@ const utils = __importStar(require("@iobroker/adapter-core"));
 const config_1 = require("./config");
 const tristarMpptTCPModbus_1 = require("./tristarMppt/tristarMpptTCPModbus");
 const tristarMpptUtil_1 = require("./tristarMppt/tristarMpptUtil");
+const STATIC_READ_INTERVAL_MS = 300000;
+const COIL_READ_INTERVAL_MS = 5000;
 class TristarMppt extends utils.Adapter {
     constructor(options = {}) {
         super({
@@ -49,6 +51,8 @@ class TristarMppt extends utils.Adapter {
         });
         this.tristar = new tristarMpptTCPModbus_1.TristarMpptTCPModbus();
         this.mainLoopRunning = false;
+        this.nextStaticRead = 0;
+        this.nextCoilRead = 0;
         this.lastStateValues = new Map();
         this.on("ready", this.onReady.bind(this));
         this.on("stateChange", this.onStateChange.bind(this));
@@ -64,7 +68,12 @@ class TristarMppt extends utils.Adapter {
             this.log.error(`Invalid configuration: ${this.errorText(error)}`);
             return;
         }
-        this.subscribeStates("control.*");
+        if (this.config.enableControlWrites) {
+            this.subscribeStates("control.*");
+        }
+        if (this.config.enableEepromWrites) {
+            this.subscribeStates("eeprom.charge.*");
+        }
         this.mainLoopRunning = true;
         void this.mainLoop();
     }
@@ -101,7 +110,10 @@ class TristarMppt extends utils.Adapter {
         await this.delObjectAsync("today.batt.Imax");
     }
     async createOrUpdateState(key, entry) {
-        const writable = Boolean(entry.writeRegister || entry.writeCoil);
+        const writeAllowed = entry.source === "eeprom"
+            ? this.config.enableEepromWrites === true
+            : this.config.enableControlWrites === true;
+        const writable = Boolean(entry.writeRegister || entry.writeCoil) && writeAllowed;
         const common = {
             name: entry.descr,
             type: entry.type,
@@ -117,34 +129,75 @@ class TristarMppt extends utils.Adapter {
         });
         await this.extendObjectAsync(key, { common });
     }
-    async updateStates() {
+    updateStates() {
+        const update = this.performUpdateStates();
+        this.activeUpdate = update;
+        const clear = () => {
+            if (this.activeUpdate === update) {
+                this.activeUpdate = undefined;
+            }
+        };
+        void update.then(clear, clear);
+        return update;
+    }
+    async performUpdateStates() {
         try {
             await this.tristar.readHoldingRegister(this.config);
+        }
+        catch (error) {
+            if (this.mainLoopRunning) {
+                await this.safeSetConnectionState(false);
+                this.log.error(`Could not read TriStar data: ${this.errorText(error)}`);
+            }
+            return;
+        }
+        if (!this.mainLoopRunning) {
+            return;
+        }
+        this.log.debug(`Raw holding registers: ${JSON.stringify(this.tristar.lastHoldingRegisters)}`);
+        await this.safeSetConnectionState(true);
+        if (Date.now() >= this.nextStaticRead) {
+            try {
+                await this.tristar.readStaticRegisters(this.config);
+                this.nextStaticRead = Date.now() + STATIC_READ_INTERVAL_MS;
+            }
+            catch (error) {
+                this.nextStaticRead = Date.now() + 60000;
+                this.log.error(`Could not read static TriStar registers: ${this.errorText(error)}`);
+            }
             if (!this.mainLoopRunning) {
                 return;
             }
-            this.log.debug(`Raw holding registers: ${JSON.stringify(this.tristar.lastHoldingRegisters)}`);
-            for (const [key, entry] of Object.entries(this.tristar.tristarData)) {
-                if (!entry.readRegister) {
-                    continue;
-                }
-                if (!this.lastStateValues.has(key) || this.lastStateValues.get(key) !== entry.value) {
+        }
+        if (Date.now() >= this.nextCoilRead) {
+            try {
+                await this.tristar.readCoilStates(this.config);
+                this.nextCoilRead = Date.now() + COIL_READ_INTERVAL_MS;
+            }
+            catch (error) {
+                this.nextCoilRead = Date.now() + 60000;
+                this.log.error(`Could not read TriStar coil states: ${this.errorText(error)}`);
+            }
+            if (!this.mainLoopRunning) {
+                return;
+            }
+        }
+        for (const [key, entry] of Object.entries(this.tristar.tristarData)) {
+            if (!this.mainLoopRunning) {
+                return;
+            }
+            if ((!entry.readRegister && !entry.readCoil) || entry.initialized === false) {
+                continue;
+            }
+            if (!this.lastStateValues.has(key) || this.lastStateValues.get(key) !== entry.value) {
+                try {
                     this.log.debug(`${key}: ${JSON.stringify(entry.value)}`);
                     await this.setStateAsync(key, { val: entry.value, ack: true });
                     this.lastStateValues.set(key, entry.value);
                 }
-            }
-            await this.setConnectionState(true);
-        }
-        catch (error) {
-            if (this.mainLoopRunning) {
-                try {
-                    await this.setConnectionState(false);
+                catch (error) {
+                    this.log.error(`Could not publish ${key}: ${this.errorText(error)}`);
                 }
-                catch (connectionStateError) {
-                    this.log.error(`Could not update info.connection: ${this.errorText(connectionStateError)}`);
-                }
-                this.log.error(`Could not update TriStar data: ${this.errorText(error)}`);
             }
         }
     }
@@ -152,6 +205,14 @@ class TristarMppt extends utils.Adapter {
         if (this.connectionState !== connected) {
             await this.setStateAsync("info.connection", { val: connected, ack: true });
             this.connectionState = connected;
+        }
+    }
+    async safeSetConnectionState(connected) {
+        try {
+            await this.setConnectionState(connected);
+        }
+        catch (error) {
+            this.log.error(`Could not update info.connection: ${this.errorText(error)}`);
         }
     }
     onUnload(callback) {
@@ -164,7 +225,25 @@ class TristarMppt extends utils.Adapter {
         this.wakeUp = undefined;
         wakeUp === null || wakeUp === void 0 ? void 0 : wakeUp();
         this.tristar.close();
-        callback();
+        let completed = false;
+        let unloadTimeout;
+        const done = () => {
+            if (completed) {
+                return;
+            }
+            completed = true;
+            if (unloadTimeout) {
+                clearTimeout(unloadTimeout);
+            }
+            callback();
+        };
+        if (this.activeUpdate) {
+            unloadTimeout = setTimeout(done, 500);
+            void this.activeUpdate.then(done, done);
+        }
+        else {
+            done();
+        }
     }
     async mainLoop() {
         while (this.mainLoopRunning) {
@@ -194,6 +273,10 @@ class TristarMppt extends utils.Adapter {
             this.log.warn(`Ignoring command for unknown state ${id}`);
             return;
         }
+        if (key.startsWith("control.") && this.config.enableControlWrites !== true) {
+            this.log.error(`Ignoring ${key}: control writes are disabled in the adapter settings`);
+            return;
+        }
         try {
             if (entry.writeRegister) {
                 if (typeof state.val !== "number" || !Number.isFinite(state.val)) {
@@ -204,8 +287,23 @@ class TristarMppt extends utils.Adapter {
                 }
                 const writeData = { value: state.val, scale: this.tristar.tristarScale };
                 const command = entry.writeRegister(writeData);
-                await this.tristar.writeHoldingRegister(this.config, command);
-                await this.setStateAsync(key, { val: state.val, ack: true });
+                if (entry.source === "eeprom") {
+                    if (this.config.enableEepromWrites !== true) {
+                        throw new Error("EEPROM writes are disabled; enable them explicitly in the adapter settings");
+                    }
+                    if (entry.initialized !== true || entry.rawValue === undefined) {
+                        throw new Error("EEPROM value has not been read yet; wait for the static register refresh");
+                    }
+                    const previousRaw = entry.rawValue;
+                    await this.tristar.writeEepromRegister(this.config, command, previousRaw);
+                    await this.setStateAsync(key, { val: entry.value, ack: true });
+                    this.lastStateValues.set(key, entry.value);
+                    this.log.info(`EEPROM ${key}: raw ${previousRaw} -> ${command.value}, readback verified; controller reset is required to clear the EEPROM-changed fault`);
+                }
+                else {
+                    await this.tristar.writeHoldingRegister(this.config, command);
+                    await this.setStateAsync(key, { val: state.val, ack: true });
+                }
                 return;
             }
             if (entry.writeCoil) {
@@ -219,7 +317,9 @@ class TristarMppt extends utils.Adapter {
                 const command = entry.writeCoil({ value: true, scale: this.tristar.tristarScale });
                 await this.tristar.writeCoil(this.config, command);
                 await this.setStateAsync(key, { val: false, ack: true });
+                return;
             }
+            this.log.warn(`Ignoring write to read-only state ${key}`);
         }
         catch (error) {
             this.log.error(`Could not write ${key}: ${this.errorText(error)}`);

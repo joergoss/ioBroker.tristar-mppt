@@ -9,6 +9,8 @@ declare global {
 			unitId: number;
 			interval: number;
 			installedWP: number;
+			enableControlWrites: boolean;
+			enableEepromWrites: boolean;
 		}
 	}
 }

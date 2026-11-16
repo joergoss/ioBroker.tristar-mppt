@@ -64,7 +64,9 @@
         "port": 502,
         "unitId": 1,
         "interval": 1,
-        "installedWP": 0
+        "installedWP": 0,
+        "enableControlWrites": false,
+        "enableEepromWrites": false
     },
     "objects": [],
     "instanceObjects": []

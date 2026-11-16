@@ -1,3 +1,4 @@
+import { SolarSnapshot } from "./solarSnapshotFilter";
 import { byteString, charge_states, encodeSignedRegister, encodeUnsignedRegister, ledState, resolveAlarmBitfield, resolveFaultsBitfield, round, signedToInteger, to32bitNumber } from "./tristarMpptUtil";
 
 export interface TristarDataEntry {
@@ -6,8 +7,13 @@ export interface TristarDataEntry {
 	role: ioBrokerRole;
 	type: ioBroker.CommonType //'number' | 'string' | 'boolean' | 'array' | 'object' | 'mixed' | 'file'
 	readRegister?: (tristarModbusData: TristarModbusData) => TristarPropertyType;
+	readCoil?: (coils: Array<boolean | number>) => TristarPropertyType;
 	writeRegister?: (twd: TristarWriteData) => TristarWriteSingleHoldingRegister;
 	writeCoil?: (twd: TristarWriteData) => TristarWriteSingleCoil
+	source?: "network" | "eeprom" | "coil";
+	initialized?: boolean;
+	rawValue?: number;
+	registerAddress?: number;
 	value: TristarPropertyType;
 	valueOld?: TristarPropertyType;
 }
@@ -35,11 +41,23 @@ export class TristarModbusData {
 	hr : TristarHoldingRegisterArray;
 	scale : TristarScale;
 	config: ioBroker.AdapterConfig;
+	filteredSolar: SolarSnapshot | null;
+	additionalRegisters: Map<number, number>;
 
-	constructor(hr: TristarHoldingRegisterArray, config: ioBroker.AdapterConfig) {
+	constructor(hr: TristarHoldingRegisterArray, config: ioBroker.AdapterConfig, filteredSolar: SolarSnapshot | null = null, additionalRegisters: Map<number, number> = new Map()) {
 		this.hr = hr;
 		this.scale = new TristarScale(hr);
 		this.config = config;
+		this.filteredSolar = filteredSolar;
+		this.additionalRegisters = additionalRegisters;
+	}
+
+	readStatic(address: number): number {
+		const value = this.additionalRegisters.get(address);
+		if (value === undefined) {
+			throw new Error(`Static register 0x${address.toString(16)} has not been read`);
+		}
+		return value;
 	}
 }
 
@@ -55,6 +73,9 @@ export class TristarScale {
 
 		const V_PU = V_PU_hi + V_PU_lo / Math.pow(2, 16);
 		const I_PU = I_PU_hi + I_PU_lo / Math.pow(2, 16);
+		if (!Number.isFinite(V_PU) || !Number.isFinite(I_PU) || V_PU <= 0 || I_PU <= 0) {
+			throw new Error(`Invalid TriStar scaling values: V_PU=${V_PU}, I_PU=${I_PU}`);
+		}
 
 		this.v = V_PU * Math.pow(2, -15);
 		this.i = I_PU * Math.pow(2, -15);
@@ -277,6 +298,32 @@ export class TristarModel {
 			: null,
 		value: null,
 	};
+	"solar.IFiltered": TristarDataEntry = {
+		descr: "Array current, median of three consecutive poll snapshots",
+		role: "value.current",
+		unit: "A",
+		type: "number",
+		readRegister: (tmd: TristarModbusData) => tmd.filteredSolar ? round(tmd.filteredSolar.current, 2) : null,
+		value: null,
+	};
+	"solar.InPowerFiltered": TristarDataEntry = {
+		descr: "Input power, median of three consecutive poll snapshots",
+		role: "value",
+		unit: "W",
+		type: "number",
+		readRegister: (tmd: TristarModbusData) => tmd.filteredSolar ? round(tmd.filteredSolar.power, 0) : null,
+		value: null,
+	};
+	"solar.InPowerPercentFiltered": TristarDataEntry = {
+		descr: "Filtered input power percent of installed Wp",
+		role: "value",
+		unit: "%",
+		type: "number",
+		readRegister: (tmd: TristarModbusData) => tmd.filteredSolar && tmd.config.installedWP > 0
+			? round(tmd.filteredSolar.power * 100 / tmd.config.installedWP, 1)
+			: null,
+		value: null,
+	};
 	"solar.sweep.Pmax": TristarDataEntry = {
 		descr: "Maximum array power found during the last sweep",
 		role: "value",
@@ -396,6 +443,26 @@ export class TristarModel {
 		type: "array",
 		readRegister:  (tmd: TristarModbusData) => JSON.stringify(resolveAlarmBitfield(to32bitNumber(tmd.hr[46], tmd.hr[47]))),
 		value: "[]",
+	};
+	"state.equalizeTriggered": TristarDataEntry = {
+		descr: "Equalize triggered coil status",
+		role: "state",
+		unit: "",
+		type: "boolean",
+		source: "coil",
+		initialized: false,
+		readCoil: coils => coils[0] === true || coils[0] === 1,
+		value: null,
+	};
+	"state.chargeDisconnect": TristarDataEntry = {
+		descr: "Charge disconnect coil status",
+		role: "state",
+		unit: "",
+		type: "boolean",
+		source: "coil",
+		initialized: false,
+		readCoil: coils => coils[2] === true || coils[2] === 1,
+		value: null,
 	};
 
 

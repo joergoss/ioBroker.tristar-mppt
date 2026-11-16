@@ -14,6 +14,11 @@ function createModbusData(registers: number[], installedWP = 2000): TristarModbu
 }
 
 describe("TristarScale", () => {
+	it("rejects missing or zero scaling values", () => {
+		const registers = new Array<number>(92).fill(0);
+		expect(() => new TristarScale(registers)).to.throw("Invalid TriStar scaling values");
+	});
+
 	it("decodes the official Morningstar voltage example", () => {
 		const registers = createRegisters();
 		registers[0] = 123;
