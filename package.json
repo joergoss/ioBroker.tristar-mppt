@@ -23,7 +23,7 @@
     "url": "https://github.com/joergoss/ioBroker.tristar-mppt"
   },
   "dependencies": {
-    "@iobroker/adapter-core": "^3.4.3",
+    "@iobroker/adapter-core": "~3.2.3",
     "jsmodbus": "^4.0.6"
   },
   "devDependencies": {
