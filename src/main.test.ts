@@ -2,6 +2,7 @@ import { expect } from "chai";
 import proxyquire from "proxyquire";
 import * as sinon from "sinon";
 import { TristarModel, TristarScale } from "./tristarMppt/tristarMpptModel";
+import { TristarStaticModel } from "./tristarMppt/tristarMpptStaticModel";
 
 const { TristarMppt } = proxyquire.noCallThru()("./main", {
 	"@iobroker/adapter-core": { Adapter: class {} },
@@ -13,14 +14,19 @@ function createAdapterHarness(): any {
 	registers[2] = 80;
 	const adapter = Object.create(TristarMppt.prototype);
 	adapter.tristar = {
-		tristarData: new TristarModel(),
+		tristarData: { ...new TristarModel(), ...new TristarStaticModel() },
 		tristarScale: new TristarScale(registers),
 		lastHoldingRegisters: registers,
 		readHoldingRegister: sinon.stub().resolves(),
+		readStaticRegisters: sinon.stub().resolves(),
+		readCoilStates: sinon.stub().resolves(),
 		writeHoldingRegister: sinon.stub().resolves(),
+		writeEepromRegister: sinon.stub().resolves(),
 		writeCoil: sinon.stub().resolves(),
 	};
-	adapter.config = { hostname: "test", port: 502, unitId: 1, interval: 5, installedWP: 0 };
+	adapter.config = { hostname: "test", port: 502, unitId: 1, interval: 5, installedWP: 0, enableControlWrites: true, enableEepromWrites: false };
+	adapter.nextStaticRead = Number.MAX_SAFE_INTEGER;
+	adapter.nextCoilRead = Number.MAX_SAFE_INTEGER;
 	adapter.log = { debug: sinon.stub(), error: sinon.stub(), warn: sinon.stub() };
 	adapter.setStateAsync = sinon.stub().resolves();
 	adapter.mainLoopRunning = true;
@@ -40,12 +46,44 @@ describe("adapter object definitions", () => {
 		const led = adapter.setObjectNotExistsAsync.getCalls().find((call: any) => call.args[0] === "state.led");
 		const voltage = adapter.setObjectNotExistsAsync.getCalls().find((call: any) => call.args[0] === "batt.V");
 		const reset = adapter.setObjectNotExistsAsync.getCalls().find((call: any) => call.args[0] === "control.Reset");
+		const eeprom = adapter.setObjectNotExistsAsync.getCalls().find((call: any) => call.args[0] === "eeprom.charge.absorptionV");
 		expect(led.args[1].common.type).to.equal("number");
 		expect(voltage.args[1].common.role).to.equal("value.voltage");
 		expect(reset.args[1].common).to.include({ role: "button", read: false, write: true });
+		expect(eeprom.args[1].common.write).to.equal(false);
 		expect(adapter.extendObjectAsync.calledWith("state.led")).to.equal(true);
 		expect(adapter.delObjectAsync.calledWith("today.batt.Imax")).to.equal(true);
 		expect(adapter.delObjectAsync.calledWith("testVariable")).to.equal(true);
+	});
+
+	it("marks every control and EEPROM state read-only without opt-in", async () => {
+		const adapter = createAdapterHarness();
+		adapter.config.enableControlWrites = false;
+		adapter.setObjectNotExistsAsync = sinon.stub().resolves();
+		adapter.extendObjectAsync = sinon.stub().resolves();
+		adapter.delObjectAsync = sinon.stub().resolves();
+
+		await adapter.initObjects();
+
+		const reset = adapter.setObjectNotExistsAsync.getCalls().find((call: any) => call.args[0] === "control.Reset");
+		const absorption = adapter.setObjectNotExistsAsync.getCalls().find((call: any) => call.args[0] === "eeprom.charge.absorptionV");
+		expect(reset.args[1].common.write).to.equal(false);
+		expect(absorption.args[1].common.write).to.equal(false);
+	});
+
+	it("enables only allowlisted EEPROM states after explicit opt-in", async () => {
+		const adapter = createAdapterHarness();
+		adapter.config.enableEepromWrites = true;
+		adapter.setObjectNotExistsAsync = sinon.stub().resolves();
+		adapter.extendObjectAsync = sinon.stub().resolves();
+		adapter.delObjectAsync = sinon.stub().resolves();
+
+		await adapter.initObjects();
+
+		const absorption = adapter.setObjectNotExistsAsync.getCalls().find((call: any) => call.args[0] === "eeprom.charge.absorptionV");
+		const hvd = adapter.setObjectNotExistsAsync.getCalls().find((call: any) => call.args[0] === "eeprom.charge.hvdV");
+		expect(absorption.args[1].common.write).to.equal(true);
+		expect(hvd.args[1].common.write).to.equal(false);
 	});
 });
 
@@ -76,6 +114,21 @@ describe("adapter state updates", () => {
 		expect(adapter.setStateAsync.withArgs("batt.V", { val: 12, ack: true }).callCount).to.equal(2);
 	});
 
+	it("keeps RAM publishing and connection state when a static refresh fails", async () => {
+		const adapter = createAdapterHarness();
+		adapter.tristar.tristarData = {
+			"batt.V": { value: 12, readRegister: sinon.stub() },
+		};
+		adapter.nextStaticRead = 0;
+		adapter.tristar.readStaticRegisters.rejects(new Error("static unavailable"));
+
+		await adapter.updateStates();
+
+		expect(adapter.setStateAsync.calledWith("batt.V", { val: 12, ack: true })).to.equal(true);
+		expect(adapter.setStateAsync.calledWith("info.connection", { val: true, ack: true })).to.equal(true);
+		expect(adapter.setStateAsync.calledWith("info.connection", { val: false, ack: true })).to.equal(false);
+	});
+
 	it("keeps the polling loop alive if info.connection cannot be written", async () => {
 		const adapter = createAdapterHarness();
 		adapter.tristar.readHoldingRegister.rejects(new Error("offline"));
@@ -88,6 +141,30 @@ describe("adapter state updates", () => {
 });
 
 describe("adapter shutdown", () => {
+	it("stops publishing further states when unload interrupts a state write", async () => {
+		const adapter = createAdapterHarness();
+		adapter.tristar.close = sinon.stub();
+		adapter.tristar.tristarData = {
+			"batt.V": { value: 12, readRegister: sinon.stub() },
+			"batt.A": { value: 1, readRegister: sinon.stub() },
+		};
+		let releaseWrite!: () => void;
+		const writeGate = new Promise<void>(resolve => releaseWrite = resolve);
+		adapter.setStateAsync.withArgs("batt.V").returns(writeGate);
+		const callback = sinon.stub();
+		const update = adapter.updateStates();
+		await new Promise(resolve => setImmediate(resolve));
+
+		adapter.onUnload(callback);
+		expect(callback.called).to.equal(false);
+		releaseWrite();
+		await update;
+		await Promise.resolve();
+
+		expect(adapter.setStateAsync.calledWith("batt.A")).to.equal(false);
+		expect(callback.calledOnce).to.equal(true);
+	});
+
 	it("cancels the polling sleep, closes Modbus I/O and calls back", async () => {
 		const adapter = createAdapterHarness();
 		adapter.tristar.close = sinon.stub();
@@ -107,6 +184,17 @@ describe("adapter shutdown", () => {
 });
 
 describe("adapter control commands", () => {
+	it("blocks control and coil writes when the global control opt-in is disabled", async () => {
+		const adapter = createAdapterHarness();
+		adapter.config.enableControlWrites = false;
+
+		await adapter.onStateChange("tristar-mppt.0.control.Reset", { val: true, ack: false });
+		await adapter.onStateChange("tristar-mppt.0.control.VbattRefSlave", { val: 10, ack: false });
+
+		expect(adapter.tristar.writeCoil.called).to.equal(false);
+		expect(adapter.tristar.writeHoldingRegister.called).to.equal(false);
+	});
+
 	it("ignores acknowledged values", async () => {
 		const adapter = createAdapterHarness();
 
@@ -144,6 +232,18 @@ describe("adapter control commands", () => {
 		expect(adapter.setStateAsync.calledWith("control.Reset", { val: false, ack: true })).to.equal(true);
 	});
 
+	it("does not acknowledge failed hardware writes", async () => {
+		const adapter = createAdapterHarness();
+		adapter.tristar.writeHoldingRegister.rejects(new Error("write failed"));
+		adapter.tristar.writeCoil.rejects(new Error("write failed"));
+
+		await adapter.onStateChange("tristar-mppt.0.control.VbattRefSlave", { val: 10, ack: false });
+		await adapter.onStateChange("tristar-mppt.0.control.Reset", { val: true, ack: false });
+
+		expect(adapter.setStateAsync.calledWith("control.VbattRefSlave")).to.equal(false);
+		expect(adapter.setStateAsync.calledWith("control.Reset")).to.equal(false);
+	});
+
 	it("writes a true button command once and resets the button", async () => {
 		const adapter = createAdapterHarness();
 
@@ -152,5 +252,46 @@ describe("adapter control commands", () => {
 		expect(adapter.tristar.writeCoil.calledOnce).to.equal(true);
 		expect(adapter.tristar.writeCoil.firstCall.args[1]).to.deep.equal({ register: 255, value: 1 });
 		expect(adapter.setStateAsync.calledWith("control.Reset", { val: false, ack: true })).to.equal(true);
+	});
+
+	it("blocks EEPROM writes by default even with a non-acknowledged state", async () => {
+		const adapter = createAdapterHarness();
+		const entry = adapter.tristar.tristarData["eeprom.charge.absorptionV"];
+		entry.initialized = true;
+		entry.rawValue = 4096;
+
+		await adapter.onStateChange("tristar-mppt.0.eeprom.charge.absorptionV", { val: 10, ack: false });
+
+		expect(adapter.tristar.writeEepromRegister.called).to.equal(false);
+		expect(adapter.setStateAsync.calledWith("eeprom.charge.absorptionV")).to.equal(false);
+	});
+
+	it("does not acknowledge an EEPROM write when readback verification fails", async () => {
+		const adapter = createAdapterHarness();
+		adapter.config.enableEepromWrites = true;
+		const entry = adapter.tristar.tristarData["eeprom.charge.absorptionV"];
+		entry.initialized = true;
+		entry.rawValue = 4096;
+		adapter.tristar.writeEepromRegister.rejects(new Error("readback failed"));
+
+		await adapter.onStateChange("tristar-mppt.0.eeprom.charge.absorptionV", { val: 20, ack: false });
+
+		expect(adapter.setStateAsync.calledWith("eeprom.charge.absorptionV")).to.equal(false);
+	});
+
+	it("uses the guarded EEPROM path with expected raw value after opt-in", async () => {
+		const adapter = createAdapterHarness();
+		adapter.config.enableEepromWrites = true;
+		const entry = adapter.tristar.tristarData["eeprom.charge.absorptionV"];
+		entry.initialized = true;
+		entry.rawValue = 4096;
+		entry.value = 10;
+
+		await adapter.onStateChange("tristar-mppt.0.eeprom.charge.absorptionV", { val: 10, ack: false });
+
+		expect(adapter.tristar.writeEepromRegister.calledOnce).to.equal(true);
+		expect(adapter.tristar.writeEepromRegister.firstCall.args[1]).to.deep.equal({ register: 0xe000, value: 4096 });
+		expect(adapter.tristar.writeEepromRegister.firstCall.args[2]).to.equal(4096);
+		expect(adapter.setStateAsync.calledWith("eeprom.charge.absorptionV", { val: 10, ack: true })).to.equal(true);
 	});
 });

@@ -3,10 +3,19 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.TristarModel = exports.TristarScale = exports.TristarModbusData = void 0;
 const tristarMpptUtil_1 = require("./tristarMpptUtil");
 class TristarModbusData {
-    constructor(hr, config) {
+    constructor(hr, config, filteredSolar = null, additionalRegisters = new Map()) {
         this.hr = hr;
         this.scale = new TristarScale(hr);
         this.config = config;
+        this.filteredSolar = filteredSolar;
+        this.additionalRegisters = additionalRegisters;
+    }
+    readStatic(address) {
+        const value = this.additionalRegisters.get(address);
+        if (value === undefined) {
+            throw new Error(`Static register 0x${address.toString(16)} has not been read`);
+        }
+        return value;
     }
 }
 exports.TristarModbusData = TristarModbusData;
@@ -18,6 +27,9 @@ class TristarScale {
         const I_PU_lo = hr[3];
         const V_PU = V_PU_hi + V_PU_lo / Math.pow(2, 16);
         const I_PU = I_PU_hi + I_PU_lo / Math.pow(2, 16);
+        if (!Number.isFinite(V_PU) || !Number.isFinite(I_PU) || V_PU <= 0 || I_PU <= 0) {
+            throw new Error(`Invalid TriStar scaling values: V_PU=${V_PU}, I_PU=${I_PU}`);
+        }
         this.v = V_PU * Math.pow(2, -15);
         this.i = I_PU * Math.pow(2, -15);
         this.p = V_PU * I_PU * Math.pow(2, -17);
@@ -223,6 +235,32 @@ class TristarModel {
                 : null,
             value: null,
         };
+        this["solar.IFiltered"] = {
+            descr: "Array current, median of three consecutive poll snapshots",
+            role: "value.current",
+            unit: "A",
+            type: "number",
+            readRegister: (tmd) => tmd.filteredSolar ? (0, tristarMpptUtil_1.round)(tmd.filteredSolar.current, 2) : null,
+            value: null,
+        };
+        this["solar.InPowerFiltered"] = {
+            descr: "Input power, median of three consecutive poll snapshots",
+            role: "value",
+            unit: "W",
+            type: "number",
+            readRegister: (tmd) => tmd.filteredSolar ? (0, tristarMpptUtil_1.round)(tmd.filteredSolar.power, 0) : null,
+            value: null,
+        };
+        this["solar.InPowerPercentFiltered"] = {
+            descr: "Filtered input power percent of installed Wp",
+            role: "value",
+            unit: "%",
+            type: "number",
+            readRegister: (tmd) => tmd.filteredSolar && tmd.config.installedWP > 0
+                ? (0, tristarMpptUtil_1.round)(tmd.filteredSolar.power * 100 / tmd.config.installedWP, 1)
+                : null,
+            value: null,
+        };
         this["solar.sweep.Pmax"] = {
             descr: "Maximum array power found during the last sweep",
             role: "value",
@@ -334,6 +372,26 @@ class TristarModel {
             type: "array",
             readRegister: (tmd) => JSON.stringify((0, tristarMpptUtil_1.resolveAlarmBitfield)((0, tristarMpptUtil_1.to32bitNumber)(tmd.hr[46], tmd.hr[47]))),
             value: "[]",
+        };
+        this["state.equalizeTriggered"] = {
+            descr: "Equalize triggered coil status",
+            role: "state",
+            unit: "",
+            type: "boolean",
+            source: "coil",
+            initialized: false,
+            readCoil: coils => coils[0] === true || coils[0] === 1,
+            value: null,
+        };
+        this["state.chargeDisconnect"] = {
+            descr: "Charge disconnect coil status",
+            role: "state",
+            unit: "",
+            type: "boolean",
+            source: "coil",
+            initialized: false,
+            readCoil: coils => coils[2] === true || coils[2] === 1,
+            value: null,
         };
         this["today.batt.Vmin"] = {
             descr: "battery minimal voltage",

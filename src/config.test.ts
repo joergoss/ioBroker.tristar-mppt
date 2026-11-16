@@ -22,6 +22,17 @@ describe("adapter configuration", () => {
 		expect(config.interval).to.equal(2);
 		expect(config.port).to.equal(503);
 		expect(config.unitId).to.equal(2);
+		expect(config.enableControlWrites).to.equal(false);
+		expect(config.enableEepromWrites).to.equal(false);
+	});
+
+	it("preserves an explicit EEPROM opt-in", () => {
+		const config = validConfig();
+		config.enableControlWrites = true;
+		config.enableEepromWrites = true;
+		validateConfig(config);
+		expect(config.enableControlWrites).to.equal(true);
+		expect(config.enableEepromWrites).to.equal(true);
 	});
 
 	it("rejects missing hostnames and values outside the documented ranges", () => {

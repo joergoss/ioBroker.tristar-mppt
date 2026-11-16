@@ -37,23 +37,50 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.TristarMpptTCPModbus = void 0;
 const modbus = __importStar(require("jsmodbus"));
 const net = __importStar(require("net"));
+const solarSnapshotFilter_1 = require("./solarSnapshotFilter");
 const tristarMpptModel_1 = require("./tristarMpptModel");
+const tristarMpptStaticModel_1 = require("./tristarMpptStaticModel");
+const tristarMpptUtil_1 = require("./tristarMpptUtil");
 const SOCKET_TIMEOUT_MS = 10000;
+const STATIC_REGISTER_BLOCKS = [
+    { start: 0x1000, count: 1 },
+    { start: 0x100f, count: 10 },
+    { start: 0x101d, count: 9 },
+    { start: 0x1026, count: 11 },
+    { start: 0x151b, count: 5 },
+    { start: 0x1520, count: 2 },
+    { start: 0xe000, count: 12 },
+    { start: 0xe00d, count: 6 },
+    { start: 0xe015, count: 6 },
+    { start: 0xe01d, count: 1 },
+    { start: 0xe020, count: 2 },
+    { start: 0xe080, count: 13 },
+    { start: 0xe0c0, count: 4 },
+    { start: 0xe0cc, count: 2 },
+];
 class TristarMpptTCPModbus {
     constructor() {
-        this.tristarData = new tristarMpptModel_1.TristarModel();
+        this.tristarData = { ...new tristarMpptModel_1.TristarModel(), ...new tristarMpptStaticModel_1.TristarStaticModel() };
         this.lastHoldingRegisters = [];
+        this.lastStaticRegisters = new Map();
+        this.staticDataLoaded = false;
         this.operation = Promise.resolve();
+        this.solarFilter = new solarSnapshotFilter_1.SolarSnapshotFilter();
         this.stopping = false;
     }
     async updateTristarData(hr, config) {
         const tmd = new tristarMpptModel_1.TristarModbusData(hr, config);
         this.tristarScale = tmd.scale;
+        tmd.filteredSolar = this.solarFilter.add(hr.slice(0, 4).join(","), {
+            current: (0, tristarMpptUtil_1.signedToInteger)(hr[29]) * tmd.scale.i,
+            power: hr[59] * tmd.scale.p,
+        });
         for (const value of Object.values(this.tristarData)) {
             const entry = value;
-            if (typeof entry.readRegister === "function") {
+            if (!entry.source && typeof entry.readRegister === "function") {
                 entry.valueOld = entry.value;
                 entry.value = entry.readRegister(tmd);
+                entry.initialized = true;
             }
         }
     }
@@ -63,16 +90,117 @@ class TristarMpptTCPModbus {
         }));
     }
     async readHoldingRegister(adapterConfig) {
+        try {
+            await this.enqueue(() => this.connect(adapterConfig, async (client) => {
+                const response = await client.readHoldingRegisters(0, 92);
+                const values = response.response.body.valuesAsArray;
+                const hr = Array.from(values);
+                if (hr.length < 92) {
+                    throw new Error(`Expected 92 holding registers, received ${hr.length}`);
+                }
+                this.lastHoldingRegisters = hr;
+                await this.updateTristarData(hr, adapterConfig);
+            }));
+        }
+        catch (error) {
+            this.solarFilter.reset();
+            throw error;
+        }
+    }
+    async readCoilStates(adapterConfig) {
         await this.enqueue(() => this.connect(adapterConfig, async (client) => {
-            const response = await client.readHoldingRegisters(0, 92);
-            const values = response.response.body.valuesAsArray;
-            const hr = Array.from(values);
-            if (hr.length < 92) {
-                throw new Error(`Expected 92 holding registers, received ${hr.length}`);
+            const response = await client.readCoils(0, 3);
+            const coils = Array.from(response.response.body.valuesAsArray).slice(0, 3);
+            if (coils.length < 3) {
+                throw new Error(`Expected at least 3 coils, received ${coils.length}`);
             }
-            this.lastHoldingRegisters = hr;
-            await this.updateTristarData(hr, adapterConfig);
+            for (const entry of Object.values(this.tristarData)) {
+                if (entry.source === "coil" && entry.readCoil) {
+                    entry.valueOld = entry.value;
+                    entry.value = entry.readCoil(coils);
+                    entry.initialized = true;
+                }
+            }
         }));
+    }
+    async readStaticRegisters(adapterConfig) {
+        if (this.lastHoldingRegisters.length < 92) {
+            throw new Error("Read RAM scaling values before static registers");
+        }
+        await this.enqueue(async () => {
+            const registers = new Map();
+            const errors = [];
+            for (const block of STATIC_REGISTER_BLOCKS) {
+                try {
+                    const values = await this.readRegisterBlock(adapterConfig, block.start, block.count);
+                    values.forEach((value, index) => registers.set(block.start + index, value));
+                }
+                catch (error) {
+                    errors.push(`0x${block.start.toString(16)}: ${error instanceof Error ? error.message : String(error)}`);
+                }
+            }
+            this.lastStaticRegisters = registers;
+            errors.push(...this.updateStaticData(registers, adapterConfig));
+            this.staticDataLoaded = errors.length === 0;
+            if (errors.length > 0) {
+                throw new Error(`Some static register blocks are unavailable: ${errors.join("; ")}`);
+            }
+        });
+    }
+    updateStaticData(registers, config) {
+        const tmd = new tristarMpptModel_1.TristarModbusData(this.lastHoldingRegisters, config, null, registers);
+        const errors = [];
+        for (const entry of Object.values(this.tristarData)) {
+            if (entry.source && entry.source !== "coil" && entry.readRegister) {
+                try {
+                    entry.valueOld = entry.value;
+                    entry.value = entry.readRegister(tmd);
+                    entry.rawValue = entry.registerAddress === undefined ? undefined : tmd.readStatic(entry.registerAddress);
+                    entry.initialized = true;
+                }
+                catch (error) {
+                    entry.initialized = false;
+                    entry.rawValue = undefined;
+                    errors.push(`${entry.descr}: ${error instanceof Error ? error.message : String(error)}`);
+                }
+            }
+        }
+        return errors;
+    }
+    async readRegisterBlock(adapterConfig, start, count) {
+        let result = [];
+        await this.connect(adapterConfig, async (client) => {
+            const response = await client.readHoldingRegisters(start, count);
+            result = Array.from(response.response.body.valuesAsArray);
+            if (result.length !== count) {
+                throw new Error(`Expected ${count} registers at 0x${start.toString(16)}, received ${result.length}`);
+            }
+        });
+        return result;
+    }
+    async writeEepromRegister(adapterConfig, command, expectedRaw) {
+        await this.enqueue(async () => {
+            const before = await this.readRegisterBlock(adapterConfig, command.register, 1);
+            if (before[0] !== expectedRaw) {
+                throw new Error(`EEPROM value at 0x${command.register.toString(16)} changed; refresh and review before writing`);
+            }
+            // Exactly one write. No automatic retry, clear-faults or controller reset.
+            await this.connect(adapterConfig, async (client) => {
+                await client.writeSingleRegister(command.register, command.value);
+            });
+            let after;
+            try {
+                after = await this.readRegisterBlock(adapterConfig, command.register, 1);
+            }
+            catch (error) {
+                throw new Error(`EEPROM write was sent but readback failed; do not retry blindly: ${error instanceof Error ? error.message : String(error)}`);
+            }
+            if (after[0] !== command.value) {
+                throw new Error(`EEPROM readback mismatch at 0x${command.register.toString(16)}: wrote ${command.value}, read ${after[0]}`);
+            }
+            this.lastStaticRegisters.set(command.register, after[0]);
+            this.updateStaticData(this.lastStaticRegisters, adapterConfig);
+        });
     }
     async writeCoil(adapterConfig, command) {
         await this.enqueue(() => this.connect(adapterConfig, async (client) => {
@@ -118,6 +246,13 @@ class TristarMpptTCPModbus {
             try {
                 const client = new modbus.client.TCP(netSocket, adapterConfig.unitId);
                 netSocket.once("error", finish);
+                netSocket.once("end", () => {
+                    // The TriStar may send a valid response and FIN together. Let the
+                    // resolved Modbus promise finish first, then reject a bare FIN.
+                    setImmediate(() => {
+                        finish(new Error("Modbus peer closed the connection before the operation completed"));
+                    });
+                });
                 netSocket.setTimeout(SOCKET_TIMEOUT_MS, () => {
                     finish(new Error(`Modbus connection timed out after ${SOCKET_TIMEOUT_MS} ms`));
                 });
@@ -136,6 +271,7 @@ class TristarMpptTCPModbus {
     }
     close() {
         this.stopping = true;
+        this.solarFilter.reset();
         if (this.activeSocket) {
             this.activeSocket.destroy(new Error("Adapter is stopping"));
             this.activeSocket = undefined;

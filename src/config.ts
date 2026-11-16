@@ -26,4 +26,6 @@ export function validateConfig(config: ioBroker.AdapterConfig): void {
 	config.unitId = unitId;
 	config.interval = interval;
 	config.installedWP = installedWP;
+	config.enableControlWrites = config.enableControlWrites === true;
+	config.enableEepromWrites = config.enableEepromWrites === true;
 }
