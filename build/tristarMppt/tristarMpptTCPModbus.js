@@ -170,7 +170,11 @@ class TristarMpptTCPModbus {
     async readRegisterBlock(adapterConfig, start, count) {
         let result = [];
         await this.connect(adapterConfig, async (client) => {
-            const response = await client.readHoldingRegisters(start, count);
+            // Active TCP values are RAM/FC03. The EEPROM table, including its
+            // network settings, is explicitly documented as input registers/FC04.
+            const response = start >= 0x151b
+                ? await client.readInputRegisters(start, count)
+                : await client.readHoldingRegisters(start, count);
             result = Array.from(response.response.body.valuesAsArray);
             if (result.length !== count) {
                 throw new Error(`Expected ${count} registers at 0x${start.toString(16)}, received ${result.length}`);

@@ -29,6 +29,9 @@ interface ModbusClient {
 	readHoldingRegisters(address: number, quantity: number): Promise<{
 		response: { body: { valuesAsArray: ArrayLike<number> } };
 	}>;
+	readInputRegisters(address: number, quantity: number): Promise<{
+		response: { body: { valuesAsArray: ArrayLike<number> } };
+	}>;
 	readCoils(address: number, quantity: number): Promise<{
 		response: { body: { valuesAsArray: ArrayLike<number | boolean> } };
 	}>;
@@ -153,7 +156,11 @@ export class TristarMpptTCPModbus {
 	private async readRegisterBlock(adapterConfig: ioBroker.AdapterConfig, start: number, count: number): Promise<number[]> {
 		let result: number[] = [];
 		await this.connect(adapterConfig, async client => {
-			const response = await client.readHoldingRegisters(start, count);
+			// Active TCP values are RAM/FC03. The EEPROM table, including its
+			// network settings, is explicitly documented as input registers/FC04.
+			const response = start >= 0x151b
+				? await client.readInputRegisters(start, count)
+				: await client.readHoldingRegisters(start, count);
 			result = Array.from(response.response.body.valuesAsArray);
 			if (result.length !== count) {
 				throw new Error(`Expected ${count} registers at 0x${start.toString(16)}, received ${result.length}`);

@@ -13,7 +13,7 @@ ioBroker-Adapter für Morningstar **TriStar MPPT**-Laderegler über **Modbus TCP
 - Nach der Morningstar-Spezifikation ist die integrierte Ethernet-/Modbus-TCP-Schnittstelle bei **TS-MPPT-60**-Modellen vorhanden. Andere Modelle werden direkt über Ethernet nicht von dieser Adapterversion unterstützt. Modbus-RTU/serielle Verbindungen sind nicht implementiert.
 - Die **TriStar-600V-Variante** besitzt eine separate Modbus-Spezifikation und ist mit diesem Adapter nicht geprüft.
 - Standardmäßig Port **502** und Modbus Unit-ID **1**.
-- Ein aktueller ioBroker js-controller und Node.js gemäß den Angaben in `io-package.json` bzw. `package.json`.
+- Runtime: Node.js `>=18.0.0` und js-controller `>=7.0.0`. Für Entwicklung und CI werden aktuelle Node.js-Versionen 22/24/26 verwendet; die Dev-Toolchain benötigt entsprechend neuere Node-Versionen als die Runtime.
 
 Die Registerimplementierung folgt der offiziellen [TriStar MPPT MODBUS Specification, MS-002582 v11](https://www.morningstarcorp.com/wp-content/uploads/technical-doc-tristar-mppt-modbus-specification-en.pdf).
 
@@ -133,7 +133,7 @@ Die historischen Daten zeigen gelegentliche einsekündige Solar-Strom-/Leistungs
 
 ## Statische Netzwerk- und EEPROM-Datenpunkte
 
-Diese Werte werden beim ersten erfolgreichen RAM-Poll und anschließend alle fünf Minuten gelesen. Ein statischer Lesefehler wird separat protokolliert und verändert nicht den erfolgreichen RAM-Verbindungsstatus. Reservierte Register werden nicht exposiert.
+Diese Werte werden beim ersten erfolgreichen RAM-Poll und anschließend alle fünf Minuten gelesen. Active-TCP-Werte verwenden FC03; die EEPROM-Tabelle einschließlich EEPROM-Netzwerk wird gemäß Morningstar mit **FC04 (Read Input Registers)** gelesen. Ein statischer Lesefehler wird separat protokolliert und verändert nicht den erfolgreichen RAM-Verbindungsstatus. Reservierte Register werden nicht exposiert.
 
 ### Active TCP Network Settings — alle read-only
 
@@ -254,8 +254,8 @@ Ein nicht nuller Wert an `VarrayFixed` oder `VarrayFixedPct` deaktiviert das nor
 1. Standardmäßig ist `enableEepromWrites=false`; die Datenpunkte sind nicht schreibbar und ein zusätzlicher Runtime-Guard blockiert direkte State-Writes.
 2. Vor einer Änderung alle aktuellen Werte lesen und dokumentieren bzw. sichern. Batteriehersteller-Vorgaben und das tatsächliche Batteriesystem sind maßgeblich; der Adapter erzwingt keine universellen Chemiegrenzen.
 3. Nur die in der Tabelle mit **Opt-in** markierten Register sind allowlistbasiert schreibbar. HVD/HVR, Schutzlimits, Stromlimit, Netzwerk-/ID- und persistente MPPT-Einstellungen bleiben read-only.
-4. Vor dem Schreiben liest der Adapter das Zielregister erneut. Hat sich der Rohwert seit der letzten Anzeige verändert, wird abgelehnt und eine erneute Prüfung verlangt.
-5. Es wird **genau ein** FC06-Write gesendet. Danach liest der Adapter das Register in einer neuen Verbindung zurück und vergleicht das Rohwort. Der quittierte State verwendet den decodierten Readback-Wert.
+4. Vor dem Schreiben liest der Adapter das Zielregister per **FC04** erneut. Hat sich der Rohwert seit der letzten Anzeige verändert, wird abgelehnt und eine erneute Prüfung verlangt.
+5. Es wird **genau ein** FC06-Write gesendet. Danach liest der Adapter das Register per **FC04** in einer neuen Verbindung zurück und vergleicht das Rohwort. Der quittierte State verwendet den decodierten Readback-Wert.
 6. Bei unklarem Write-/Readback-Ergebnis gibt es kein automatisches Retry. Erst den IST-Wert erneut lesen und prüfen, ob das Kommando bereits ausgeführt wurde.
 7. Der Adapter führt **kein** automatisches Clear Faults und **keinen** automatischen Controller-Reset aus. Nach einem EEPROM-Write wird der erforderliche Reset ausdrücklich im Log gemeldet; ein Reset ist separat manuell zu prüfen und auszulösen.
 

@@ -222,15 +222,19 @@ describe("local Modbus TCP integration", () => {
 		holding.writeUInt16BE(80, 0);
 		holding.writeUInt16BE(80, 4);
 		holding.writeUInt16BE(4096, 0xe000 * 2);
+		const input = Buffer.alloc(0xe0ce * 2);
+		input.writeUInt16BE(4096, 0xe000 * 2);
 		const coils = Buffer.alloc(32);
 		const server = net.createServer();
 		let peer: net.Socket | undefined;
 		server.on("connection", socket => peer = socket);
-		const modbusServer = new modbus.server.TCP(server, { holding, coils });
+		const modbusServer = new modbus.server.TCP(server, { holding, input, coils });
 		let writes = 0;
 		modbusServer.on("postReadHoldingRegisters", () => peer?.end());
+		modbusServer.on("postReadInputRegisters", () => peer?.end());
 		modbusServer.on("postWriteSingleRegister", () => {
 			writes++;
+			input.writeUInt16BE(holding.readUInt16BE(0xe000 * 2), 0xe000 * 2);
 			peer?.end();
 		});
 		const port = await listen(server);
@@ -255,14 +259,15 @@ describe("local Modbus TCP integration", () => {
 		const holding = Buffer.alloc(0xe0ce * 2);
 		holding.writeUInt16BE(80, 0);
 		holding.writeUInt16BE(80, 4);
-		holding.writeUInt16BE(4096, 0xe000 * 2);
+		const input = Buffer.alloc(0xe0ce * 2);
+		input.writeUInt16BE(4096, 0xe000 * 2);
 		const coils = Buffer.alloc(32);
 		const server = net.createServer();
-		const modbusServer = new modbus.server.TCP(server, { holding, coils });
+		const modbusServer = new modbus.server.TCP(server, { holding, input, coils });
 		let writes = 0;
 		modbusServer.on("postWriteSingleRegister", () => {
 			writes++;
-			holding.writeUInt16BE(8193, 0xe000 * 2);
+			input.writeUInt16BE(8193, 0xe000 * 2);
 		});
 		const port = await listen(server);
 		const client = new TristarMpptTCPModbus();
@@ -288,10 +293,11 @@ describe("local Modbus TCP integration", () => {
 		const holding = Buffer.alloc(0xe0ce * 2);
 		holding.writeUInt16BE(80, 0);
 		holding.writeUInt16BE(80, 4);
-		holding.writeUInt16BE(4096, 0xe000 * 2);
+		const input = Buffer.alloc(0xe0ce * 2);
+		input.writeUInt16BE(4096, 0xe000 * 2);
 		const coils = Buffer.alloc(32);
 		const server = net.createServer();
-		const modbusServer = new modbus.server.TCP(server, { holding, coils });
+		const modbusServer = new modbus.server.TCP(server, { holding, input, coils });
 		let writes = 0;
 		modbusServer.on("postWriteSingleRegister", () => {
 			writes++;
@@ -323,10 +329,16 @@ describe("local Modbus TCP integration", () => {
 			socket.once("data", request => {
 				const transaction = request.subarray(0, 2);
 				const unit = request[6];
+				const functionCode = request[7];
 				const address = request.readUInt16BE(8);
 				const count = request.readUInt16BE(10);
+				const expectedFunctionCode = address >= 0x151b ? 4 : 3;
+				if (functionCode !== expectedFunctionCode) {
+					socket.end(Buffer.concat([transaction, Buffer.from([0, 0, 0, 3, unit, functionCode | 0x80, 0x01])]));
+					return;
+				}
 				if (address === 0x1520) {
-					socket.end(Buffer.concat([transaction, Buffer.from([0, 0, 0, 3, unit, 0x83, 0x02])]));
+					socket.end(Buffer.concat([transaction, Buffer.from([0, 0, 0, 3, unit, functionCode | 0x80, 0x02])]));
 					return;
 				}
 				const values = Buffer.alloc(count * 2);
@@ -337,7 +349,7 @@ describe("local Modbus TCP integration", () => {
 				const responseHeader = Buffer.alloc(4);
 				responseHeader.writeUInt16BE(values.length + 3, 0);
 				responseHeader.writeUInt8(unit, 2);
-				responseHeader.writeUInt8(3, 3);
+				responseHeader.writeUInt8(functionCode, 3);
 				socket.end(Buffer.concat([header, responseHeader, Buffer.from([values.length]), values]));
 			});
 		});
@@ -367,15 +379,23 @@ describe("local Modbus TCP integration", () => {
 		const holding = Buffer.alloc(0xe0ce * 2);
 		holding.writeUInt16BE(80, 0);
 		holding.writeUInt16BE(80, 4);
-		holding.writeUInt16BE(4096, 0xe000 * 2);
-		holding.writeUInt16BE(1, 0xe0cc * 2);
 		holding.writeUInt16BE(0xa8c0, 0x100f * 2);
 		holding.writeUInt16BE(0xfd01, 0x1010 * 2);
+		const input = Buffer.alloc(0xe0ce * 2);
+		input.writeUInt16BE(4096, 0xe000 * 2);
+		input.writeUInt16BE(1, 0xe0cc * 2);
 		const coils = Buffer.alloc(32);
 		const server = net.createServer();
-		const modbusServer = new modbus.server.TCP(server, { holding, coils });
+		const modbusServer = new modbus.server.TCP(server, { holding, input, coils });
 		let eepromWrites = 0;
-		modbusServer.on("postWriteSingleRegister", () => eepromWrites++);
+		let holdingReads = 0;
+		let inputReads = 0;
+		modbusServer.on("postReadHoldingRegisters", () => holdingReads++);
+		modbusServer.on("postReadInputRegisters", () => inputReads++);
+		modbusServer.on("postWriteSingleRegister", () => {
+			eepromWrites++;
+			input.writeUInt16BE(holding.readUInt16BE(0xe000 * 2), 0xe000 * 2);
+		});
 		const port = await listen(server);
 		const client = new TristarMpptTCPModbus();
 		const config = configForPort(port);
@@ -384,6 +404,8 @@ describe("local Modbus TCP integration", () => {
 			await client.readHoldingRegister(config);
 			await client.readStaticRegisters(config);
 			expect(client.staticDataLoaded).to.equal(true);
+			expect(holdingReads).to.equal(5); // Initial RAM read plus four Active-TCP blocks.
+			expect(inputReads).to.equal(10); // Every EEPROM block uses FC04.
 			expect(client.tristarData["network.ip"].value).to.equal("192.168.1.253");
 			expect(client.tristarData["eeprom.info.model"].value).to.equal("TS-MPPT-60");
 			expect(client.tristarData["eeprom.charge.absorptionV"].value).to.equal(10);

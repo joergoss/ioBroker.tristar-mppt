@@ -9,7 +9,7 @@
   "homepage": "https://github.com/joergspoerl/ioBroker.tristar-mppt",
   "license": "MIT",
   "engines": {
-    "node": ">=22.19.0"
+    "node": ">=18.0.0"
   },
   "keywords": [
     "ioBroker",
