@@ -20,6 +20,34 @@ async function closeServer(server: net.Server): Promise<void> {
 	await new Promise<void>(resolve => server.close(() => resolve()));
 }
 
+function createScaleChangeServer(registers: number[], responseGate: Promise<void>): { server: net.Server; getRequests: () => number; getWrites: () => number } {
+	let requests = 0;
+	let writes = 0;
+	const server = net.createServer(socket => {
+		socket.once("data", request => {
+			if (request[7] === 6) {
+				writes++;
+				socket.end();
+				return;
+			}
+			requests++;
+			void responseGate.then(() => {
+				const count = request.readUInt16BE(10);
+				const values = Buffer.alloc(count * 2);
+				for (let index = 0; index < count; index++) {
+					values.writeUInt16BE(registers[index] ?? 0, index * 2);
+				}
+				const responseHeader = Buffer.alloc(4);
+				responseHeader.writeUInt16BE(values.length + 3, 0);
+				responseHeader.writeUInt8(request[6], 2);
+				responseHeader.writeUInt8(3, 3);
+				socket.end(Buffer.concat([request.subarray(0, 4), responseHeader, Buffer.from([values.length]), values]));
+			});
+		});
+	});
+	return { server, getRequests: () => requests, getWrites: () => writes };
+}
+
 describe("Modbus operation pipeline", () => {
 	it("runs operations sequentially in FIFO order", async () => {
 		const client = new TristarMpptTCPModbus() as any;
@@ -105,6 +133,101 @@ describe("solar outlier filtering", () => {
 	});
 });
 
+describe("scaling changes", () => {
+	it("invalidates static values and EEPROM write state before a new decode", async () => {
+		const client = new TristarMpptTCPModbus();
+		const registers = new Array<number>(92).fill(0);
+		registers[0] = 80;
+		registers[2] = 80;
+		await client.updateTristarData(registers, { installedWP: 0 } as ioBroker.AdapterConfig);
+		client.lastHoldingRegisters = registers;
+		client.updateStaticData(new Map([[0xe000, 4096]]), { installedWP: 0 } as ioBroker.AdapterConfig);
+		expect(client.tristarData["eeprom.charge.absorptionV"].value).to.equal(10);
+
+		registers[0] = 160;
+		await client.updateTristarData(registers, { installedWP: 0 } as ioBroker.AdapterConfig);
+
+		const entry = client.tristarData["eeprom.charge.absorptionV"];
+		expect(entry.value).to.equal(null);
+		expect(entry.initialized).to.equal(false);
+		expect(entry.rawValue).to.equal(undefined);
+		expect(client.staticDataLoaded).to.equal(false);
+		expect(client.staticDataStale).to.equal(true);
+	});
+
+	it("discards a queued RAM write when the queued read changes scaling", async () => {
+		const oldRegisters = new Array<number>(92).fill(0);
+		oldRegisters[0] = 80;
+		oldRegisters[2] = 80;
+		const newRegisters = [...oldRegisters];
+		newRegisters[0] = 160;
+		let releaseResponse!: () => void;
+		const responseGate = new Promise<void>(resolve => releaseResponse = resolve);
+		const emulator = createScaleChangeServer(newRegisters, responseGate);
+		const port = await listen(emulator.server);
+		const client = new TristarMpptTCPModbus();
+		const config = configForPort(port);
+		await client.updateTristarData(oldRegisters, config);
+		const oldSignature = client.scaleSignature!;
+
+		try {
+			const read = client.readHoldingRegister(config);
+			await new Promise(resolve => setImmediate(resolve));
+			const write = client.writeHoldingRegister(config, { register: 89, value: 4096 }, oldSignature);
+			releaseResponse();
+			await read;
+			try {
+				await write;
+				expect.fail("stale-scale write should reject");
+			} catch (error) {
+				expect((error as Error).message).to.contain("Scaling values changed");
+			}
+			expect(emulator.getRequests()).to.equal(1);
+			expect(emulator.getWrites()).to.equal(0);
+		} finally {
+			client.close();
+			await closeServer(emulator.server);
+		}
+	});
+
+	it("discards a queued EEPROM write when the queued read changes scaling", async () => {
+		const oldRegisters = new Array<number>(92).fill(0);
+		oldRegisters[0] = 80;
+		oldRegisters[2] = 80;
+		const newRegisters = [...oldRegisters];
+		newRegisters[0] = 160;
+		let releaseResponse!: () => void;
+		const responseGate = new Promise<void>(resolve => releaseResponse = resolve);
+		const emulator = createScaleChangeServer(newRegisters, responseGate);
+		const port = await listen(emulator.server);
+		const client = new TristarMpptTCPModbus();
+		const config = configForPort(port);
+		await client.updateTristarData(oldRegisters, config);
+		client.lastHoldingRegisters = oldRegisters;
+		client.updateStaticData(new Map([[0xe000, 4096]]), config);
+		const oldSignature = client.scaleSignature!;
+
+		try {
+			const read = client.readHoldingRegister(config);
+			await new Promise(resolve => setImmediate(resolve));
+			const write = client.writeEepromRegister(config, { register: 0xe000, value: 4096 }, 4096, oldSignature);
+			releaseResponse();
+			await read;
+			try {
+				await write;
+				expect.fail("stale-scale EEPROM write should reject");
+			} catch (error) {
+				expect((error as Error).message).to.contain("Scaling values changed");
+			}
+			expect(emulator.getRequests()).to.equal(1);
+			expect(emulator.getWrites()).to.equal(0);
+		} finally {
+			client.close();
+			await closeServer(emulator.server);
+		}
+	});
+});
+
 describe("full-frame decoder robustness", () => {
 	it("keeps all RAM values available when upper DIP bits are set", async () => {
 		const client = new TristarMpptTCPModbus();
@@ -161,7 +284,7 @@ describe("local Modbus TCP integration", () => {
 			expect(client.tristarData["state.equalizeTriggered"].value).to.equal(true);
 			expect(client.tristarData["state.chargeDisconnect"].value).to.equal(true);
 
-			await client.writeHoldingRegister(configForPort(port), { register: 89, value: 4096 });
+			await client.writeHoldingRegister(configForPort(port), { register: 89, value: 4096 }, client.scaleSignature!);
 			expect(holding.readUInt16BE(89 * 2)).to.equal(4096);
 
 			await client.writeCoil(configForPort(port), { register: 20, value: 1 });
@@ -244,7 +367,7 @@ describe("local Modbus TCP integration", () => {
 		try {
 			await client.readHoldingRegister(config);
 			client.lastStaticRegisters = new Map([[0xe000, 4096]]);
-			await client.writeEepromRegister(config, { register: 0xe000, value: 8192 }, 4096);
+			await client.writeEepromRegister(config, { register: 0xe000, value: 8192 }, 4096, client.scaleSignature!);
 			expect(holding.readUInt16BE(0xe000 * 2)).to.equal(8192);
 			expect(client.tristarData["eeprom.charge.absorptionV"].value).to.equal(20);
 			expect(writes).to.equal(1);
@@ -276,13 +399,15 @@ describe("local Modbus TCP integration", () => {
 		try {
 			await client.readHoldingRegister(config);
 			client.updateStaticData(new Map([[0xe000, 4096]]), config);
-			await client.writeEepromRegister(config, { register: 0xe000, value: 8192 }, 4096);
+			await client.writeEepromRegister(config, { register: 0xe000, value: 8192 }, 4096, client.scaleSignature!);
 			expect.fail("readback mismatch should reject");
 		} catch (error) {
 			expect((error as Error).message).to.contain("readback mismatch");
 		} finally {
 			expect(writes).to.equal(1);
 			expect(client.tristarData["eeprom.charge.absorptionV"].value).to.equal(10);
+			expect((client as any).eepromWriteVersion).to.equal(1);
+			expect(client.staticDataStale).to.equal(true);
 			expect(coils.equals(Buffer.alloc(32))).to.equal(true);
 			client.close();
 			await closeServer(server);
@@ -310,14 +435,57 @@ describe("local Modbus TCP integration", () => {
 		try {
 			await client.readHoldingRegister(config);
 			client.updateStaticData(new Map([[0xe000, 4096]]), config);
-			await client.writeEepromRegister(config, { register: 0xe000, value: 8192 }, 4096);
+			await client.writeEepromRegister(config, { register: 0xe000, value: 8192 }, 4096, client.scaleSignature!);
 			expect.fail("failed readback should reject");
 		} catch (error) {
 			expect((error as Error).message).to.contain("do not retry blindly");
 		} finally {
 			expect(writes).to.equal(1);
 			expect(client.tristarData["eeprom.charge.absorptionV"].value).to.equal(10);
+			expect((client as any).eepromWriteVersion).to.equal(1);
+			expect(client.staticDataStale).to.equal(true);
 			expect(coils.equals(Buffer.alloc(32))).to.equal(true);
+			client.close();
+			await closeServer(server);
+		}
+	});
+
+	it("invalidates static snapshots when an EEPROM write response is lost", async () => {
+		let writes = 0;
+		const server = net.createServer(socket => {
+			socket.once("data", request => {
+				if (request[7] === 6) {
+					writes++;
+					socket.destroy();
+					return;
+				}
+				const values = Buffer.from([0x10, 0x00]);
+				const responseHeader = Buffer.alloc(4);
+				responseHeader.writeUInt16BE(5, 0);
+				responseHeader.writeUInt8(request[6], 2);
+				responseHeader.writeUInt8(4, 3);
+				socket.end(Buffer.concat([request.subarray(0, 4), responseHeader, Buffer.from([2]), values]));
+			});
+		});
+		const port = await listen(server);
+		const client = new TristarMpptTCPModbus();
+		const config = configForPort(port);
+		const registers = new Array<number>(92).fill(0);
+		registers[0] = 80;
+		registers[2] = 80;
+		await client.updateTristarData(registers, config);
+		client.lastHoldingRegisters = registers;
+		client.updateStaticData(new Map([[0xe000, 4096]]), config);
+
+		try {
+			await client.writeEepromRegister(config, { register: 0xe000, value: 8192 }, 4096, client.scaleSignature!);
+			expect.fail("lost write response should reject");
+		} catch {
+			expect(writes).to.equal(1);
+			expect((client as any).eepromWriteVersion).to.equal(1);
+			expect(client.staticDataStale).to.equal(true);
+			expect(client.tristarData["eeprom.charge.absorptionV"].value).to.equal(10);
+		} finally {
 			client.close();
 			await closeServer(server);
 		}
@@ -410,14 +578,14 @@ describe("local Modbus TCP integration", () => {
 			expect(client.tristarData["eeprom.info.model"].value).to.equal("TS-MPPT-60");
 			expect(client.tristarData["eeprom.charge.absorptionV"].value).to.equal(10);
 
-			await client.writeEepromRegister(config, { register: 0xe000, value: 8192 }, 4096);
+			await client.writeEepromRegister(config, { register: 0xe000, value: 8192 }, 4096, client.scaleSignature!);
 			expect(holding.readUInt16BE(0xe000 * 2)).to.equal(8192);
 			expect(client.tristarData["eeprom.charge.absorptionV"].value).to.equal(20);
 			expect(eepromWrites).to.equal(1);
 			expect(coils.equals(Buffer.alloc(32))).to.equal(true);
 
 			try {
-				await client.writeEepromRegister(config, { register: 0xe000, value: 4096 }, 1234);
+				await client.writeEepromRegister(config, { register: 0xe000, value: 4096 }, 1234, client.scaleSignature!);
 				expect.fail("stale expected value should reject");
 			} catch (error) {
 				expect((error as Error).message).to.contain("changed");

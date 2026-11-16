@@ -16,6 +16,7 @@ function createAdapterHarness(): any {
 	adapter.tristar = {
 		tristarData: { ...new TristarModel(), ...new TristarStaticModel() },
 		tristarScale: new TristarScale(registers),
+		scaleSignature: "80,0,80,0",
 		lastHoldingRegisters: registers,
 		readHoldingRegister: sinon.stub().resolves(),
 		readStaticRegisters: sinon.stub().resolves(),
@@ -31,6 +32,7 @@ function createAdapterHarness(): any {
 	adapter.setStateAsync = sinon.stub().resolves();
 	adapter.mainLoopRunning = true;
 	adapter.lastStateValues = new Map();
+	adapter.stateWriteQueues = new Map();
 	return adapter;
 }
 
@@ -114,6 +116,24 @@ describe("adapter state updates", () => {
 		expect(adapter.setStateAsync.withArgs("batt.V", { val: 12, ack: true }).callCount).to.equal(2);
 	});
 
+	it("publishes fresh RAM values without awaiting a pending static refresh", async () => {
+		const adapter = createAdapterHarness();
+		adapter.tristar.tristarData = {
+			"batt.V": { value: 12, readRegister: sinon.stub() },
+		};
+		adapter.nextStaticRead = 0;
+		let releaseStatic!: () => void;
+		const staticGate = new Promise<void>(resolve => releaseStatic = resolve);
+		adapter.tristar.readStaticRegisters.returns(staticGate);
+
+		await adapter.updateStates();
+
+		expect(adapter.setStateAsync.calledWith("batt.V", { val: 12, ack: true })).to.equal(true);
+		expect(adapter.staticReadPromise).to.equal(staticGate);
+		releaseStatic();
+		await staticGate;
+	});
+
 	it("keeps RAM publishing and connection state when a static refresh fails", async () => {
 		const adapter = createAdapterHarness();
 		adapter.tristar.tristarData = {
@@ -141,6 +161,32 @@ describe("adapter state updates", () => {
 });
 
 describe("adapter shutdown", () => {
+	it("does not restart polling or subscriptions after unload during initialization", async () => {
+		const adapter = createAdapterHarness();
+		adapter.mainLoopRunning = false;
+		adapter.unloaded = false;
+		adapter.tristar.close = sinon.stub();
+		let releaseInit!: () => void;
+		const initGate = new Promise<void>(resolve => releaseInit = resolve);
+		adapter.initObjects = sinon.stub().returns(initGate);
+		adapter.setConnectionState = sinon.stub().resolves();
+		adapter.subscribeStates = sinon.stub();
+		adapter.mainLoop = sinon.stub().resolves();
+		const callback = sinon.stub();
+		const ready = adapter.onReady();
+		await new Promise(resolve => setImmediate(resolve));
+
+		adapter.onUnload(callback);
+		releaseInit();
+		await ready;
+
+		expect(callback.calledOnce).to.equal(true);
+		expect(adapter.tristar.close.calledOnce).to.equal(true);
+		expect(adapter.subscribeStates.called).to.equal(false);
+		expect(adapter.mainLoop.called).to.equal(false);
+		expect(adapter.mainLoopRunning).to.equal(false);
+	});
+
 	it("stops publishing further states when unload interrupts a state write", async () => {
 		const adapter = createAdapterHarness();
 		adapter.tristar.close = sinon.stub();
@@ -163,6 +209,22 @@ describe("adapter shutdown", () => {
 
 		expect(adapter.setStateAsync.calledWith("batt.A")).to.equal(false);
 		expect(callback.calledOnce).to.equal(true);
+	});
+
+	it("does not log expected static-read cancellation during unload", async () => {
+		const adapter = createAdapterHarness();
+		adapter.tristar.tristarData = {};
+		adapter.nextStaticRead = 0;
+		let rejectStatic!: (error: Error) => void;
+		const staticRead = new Promise<void>((_resolve, reject) => rejectStatic = reject);
+		adapter.tristar.readStaticRegisters.returns(staticRead);
+		adapter.tristar.close = sinon.stub().callsFake(() => rejectStatic(new Error("Adapter is stopping")));
+		await adapter.updateStates();
+
+		adapter.onUnload(sinon.stub());
+		await new Promise(resolve => setImmediate(resolve));
+
+		expect(adapter.log.error.calledWithMatch("Could not read static TriStar registers")).to.equal(false);
 	});
 
 	it("cancels the polling sleep, closes Modbus I/O and calls back", async () => {
@@ -266,6 +328,18 @@ describe("adapter control commands", () => {
 		expect(adapter.setStateAsync.calledWith("eeprom.charge.absorptionV")).to.equal(false);
 	});
 
+	it("blocks EEPROM writes after scale invalidation until a fresh decode", async () => {
+		const adapter = createAdapterHarness();
+		adapter.config.enableEepromWrites = true;
+		const entry = adapter.tristar.tristarData["eeprom.charge.absorptionV"];
+		entry.initialized = false;
+		entry.rawValue = undefined;
+
+		await adapter.onStateChange("tristar-mppt.0.eeprom.charge.absorptionV", { val: 10, ack: false });
+
+		expect(adapter.tristar.writeEepromRegister.called).to.equal(false);
+	});
+
 	it("does not acknowledge an EEPROM write when readback verification fails", async () => {
 		const adapter = createAdapterHarness();
 		adapter.config.enableEepromWrites = true;
@@ -293,5 +367,36 @@ describe("adapter control commands", () => {
 		expect(adapter.tristar.writeEepromRegister.firstCall.args[1]).to.deep.equal({ register: 0xe000, value: 4096 });
 		expect(adapter.tristar.writeEepromRegister.firstCall.args[2]).to.equal(4096);
 		expect(adapter.setStateAsync.calledWith("eeprom.charge.absorptionV", { val: 10, ack: true })).to.equal(true);
+	});
+
+	it("serializes an older poll write before a newer verified EEPROM ACK", async () => {
+		const adapter = createAdapterHarness();
+		adapter.config.enableEepromWrites = true;
+		const key = "eeprom.charge.absorptionV";
+		const entry = adapter.tristar.tristarData[key];
+		entry.initialized = true;
+		entry.rawValue = 4096;
+		entry.value = 10;
+		adapter.tristar.tristarData = { [key]: entry };
+		let releaseOldWrite!: () => void;
+		const oldWriteGate = new Promise<void>(resolve => releaseOldWrite = resolve);
+		adapter.setStateAsync.withArgs(key).onFirstCall().returns(oldWriteGate);
+		adapter.tristar.writeEepromRegister.callsFake(async () => {
+			entry.value = 20;
+			entry.rawValue = 8192;
+		});
+
+		const poll = adapter.updateStates();
+		await new Promise(resolve => setImmediate(resolve));
+		const command = adapter.onStateChange(`tristar-mppt.0.${key}`, { val: 20, ack: false });
+		await new Promise(resolve => setImmediate(resolve));
+		expect(adapter.setStateAsync.withArgs(key).callCount).to.equal(1);
+
+		releaseOldWrite();
+		await Promise.all([poll, command]);
+
+		const values = adapter.setStateAsync.getCalls().filter((call: any) => call.args[0] === key).map((call: any) => call.args[1].val);
+		expect(values).to.deep.equal([10, 20]);
+		expect(adapter.lastStateValues.get(key)).to.equal(20);
 	});
 });

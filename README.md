@@ -256,8 +256,10 @@ Ein nicht nuller Wert an `VarrayFixed` oder `VarrayFixedPct` deaktiviert das nor
 3. Nur die in der Tabelle mit **Opt-in** markierten Register sind allowlistbasiert schreibbar. HVD/HVR, Schutzlimits, Stromlimit, Netzwerk-/ID- und persistente MPPT-Einstellungen bleiben read-only.
 4. Vor dem Schreiben liest der Adapter das Zielregister per **FC04** erneut. Hat sich der Rohwert seit der letzten Anzeige verändert, wird abgelehnt und eine erneute Prüfung verlangt.
 5. Es wird **genau ein** FC06-Write gesendet. Danach liest der Adapter das Register per **FC04** in einer neuen Verbindung zurück und vergleicht das Rohwort. Der quittierte State verwendet den decodierten Readback-Wert.
-6. Bei unklarem Write-/Readback-Ergebnis gibt es kein automatisches Retry. Erst den IST-Wert erneut lesen und prüfen, ob das Kommando bereits ausgeführt wurde.
+6. Bei unklarem Write-/Readback-Ergebnis gibt es kein automatisches Retry. Sobald ein FC06 möglicherweise gesendet wurde, wird eine Write-Generation erhöht und ein neuer statischer Refresh erzwungen. Dadurch kann auch kein parallel gelesener, gemischter Snapshot als aktuell akzeptiert werden. Erst den IST-Wert erneut lesen und prüfen, ob das Kommando bereits ausgeführt wurde.
 7. Der Adapter führt **kein** automatisches Clear Faults und **keinen** automatischen Controller-Reset aus. Nach einem EEPROM-Write wird der erforderliche Reset ausdrücklich im Log gemeldet; ein Reset ist separat manuell zu prüfen und auszulösen.
+
+Ändern sich `V_PU` oder `I_PU`, werden statische Werte sofort auf `null` invalidiert, ihre alten Rohwerte verworfen und EEPROM-Writes bis zu einem erfolgreichen Neu-Decode blockiert. Bereits in der FIFO wartende RAM-/EEPROM-Kommandos tragen ihre Scale-Signatur und werden bei Abweichung **vor jedem Hardware-Write** verworfen. Auch ein rein roher Fresh-Read-Vergleich kann somit keine semantisch veraltete Skalierung übersehen.
 
 Die Button-Datenpunkte werden nach erfolgreichem `true`-Kommando automatisch wieder auf `false` mit `ack=true` gesetzt. Ein Schreiben von `false` verursacht keinen Coil-Zugriff.
 
@@ -306,6 +308,9 @@ Die Register-, Konvertierungs- und Kommandotests verwenden Fixtures bzw. Mocks u
 - (joerg) Allowlistbasierte EEPROM-Ladeschreibzugriffe mit Opt-in, Fresh-Read, Readback und ohne Auto-Reset (#11).
 - (joerg) Sämtliche RAM-/Coil-/EEPROM-Schreibzugriffe standardmäßig deaktiviert und durch getrennte Opt-ins plus Runtime-Guards geschützt (#4, #11).
 - (joerg) DIP-Bitfeld vollständig auf 16 Bit korrigiert; exhaustive Konvertierungs- und deterministische Fuzz-Tests ergänzt (#13).
+- (joerg) EEPROM-Reads/Fresh-Read/Readback auf FC04 korrigiert und Runtime-Kompatibilität mit Node.js 18 / js-controller 7.0 erhalten (#14, #15).
+- (joerg) Poll-/ACK-Writes pro Datenpunkt serialisiert und Skalierungswechsel invalidieren EEPROM-Werte bis zum Neu-Decode (#16, #17).
+- (joerg) Statische Refreshs blockieren RAM-Publishing nicht mehr; Unload während Initialisierung und Hintergrund-Reads ist sauber (#5).
 
 ### 0.0.2 (2022-01-15)
 - (joerg) initial release
