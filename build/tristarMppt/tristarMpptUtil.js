@@ -9,6 +9,7 @@ exports.encodeUnsignedRegister = encodeUnsignedRegister;
 exports.resolveFaultsBitfield = resolveFaultsBitfield;
 exports.resolveAlarmBitfield = resolveAlarmBitfield;
 exports.byteString = byteString;
+exports.wordString = wordString;
 exports.splitIdFromAdapter = splitIdFromAdapter;
 // helper function to convert signed value to integer
 function signedToInteger(value) {
@@ -152,6 +153,12 @@ function byteString(n) {
         throw new Error(n + " does not fit in a byte");
     }
     return ("000000000" + n.toString(2)).substr(-8);
+}
+function wordString(n) {
+    if (!Number.isInteger(n) || n < 0 || n > 0xffff) {
+        throw new Error(`${n} does not fit in a 16-bit word`);
+    }
+    return n.toString(2).padStart(16, "0");
 }
 function splitIdFromAdapter(str) {
     const delimiter = ".";

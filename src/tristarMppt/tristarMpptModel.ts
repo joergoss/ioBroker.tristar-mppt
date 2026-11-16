@@ -1,5 +1,5 @@
 import { SolarSnapshot } from "./solarSnapshotFilter";
-import { byteString, charge_states, encodeSignedRegister, encodeUnsignedRegister, ledState, resolveAlarmBitfield, resolveFaultsBitfield, round, signedToInteger, to32bitNumber } from "./tristarMpptUtil";
+import { charge_states, encodeSignedRegister, encodeUnsignedRegister, ledState, resolveAlarmBitfield, resolveFaultsBitfield, round, signedToInteger, to32bitNumber, wordString } from "./tristarMpptUtil";
 
 export interface TristarDataEntry {
 	descr: string,
@@ -410,12 +410,12 @@ export class TristarModel {
 
 
 	"state.dip":    TristarDataEntry = {
-		descr: "DIP switch positions as an 8-bit string",
+		descr: "DIP switch positions as a 16-bit string",
 		role:  "state",
 		unit:  "",
 		type: "string",
-		readRegister:  (tmd: TristarModbusData) => byteString(tmd.hr[48]),
-		value: "00000000",
+		readRegister:  (tmd: TristarModbusData) => wordString(tmd.hr[48]),
+		value: "0000000000000000",
 	};
 
 	"state.led":    TristarDataEntry = {

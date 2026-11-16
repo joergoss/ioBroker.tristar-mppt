@@ -200,6 +200,15 @@ describe("TristarModel register mapping", () => {
 		expect(model["today.timeFloat"].readRegister!(data)).to.equal(300);
 	});
 
+	it("decodes the complete 16-bit DIP register", () => {
+		const model = new TristarModel();
+		for (const [rawValue, expected] of [[0, "0000000000000000"], [0xff, "0000000011111111"], [0x8000, "1000000000000000"], [0xffff, "1111111111111111"]] as const) {
+			const registers = createRegisters();
+			registers[48] = rawValue;
+			expect(model["state.dip"].readRegister!(createModbusData(registers))).to.equal(expected);
+		}
+	});
+
 	it("keeps unknown enum values diagnosable", () => {
 		const registers = createRegisters();
 		registers[49] = 255;
@@ -239,6 +248,34 @@ describe("TristarModel register mapping", () => {
 		expect(percentage.writeRegister!({ value: 50, scale })).to.deep.equal({ register: 91, value: 32768 });
 		expect(percentage.writeRegister!({ value: 100, scale })).to.deep.equal({ register: 91, value: 65535 });
 		expect(() => percentage.writeRegister!({ value: 101, scale })).to.throw();
+	});
+});
+
+describe("deterministic decoder fuzzing", () => {
+	it("handles 1,000 full 16-bit RAM frames without exceptions or non-finite values", () => {
+		const model = new TristarModel();
+		let seed = 0x5eed1234;
+		const nextWord = (): number => {
+			seed ^= seed << 13;
+			seed ^= seed >>> 17;
+			seed ^= seed << 5;
+			return seed & 0xffff;
+		};
+		for (let iteration = 0; iteration < 1000; iteration++) {
+			const registers = new Array<number>(92).fill(0).map(() => nextWord());
+			registers[0] = 1 + (nextWord() % 500);
+			registers[2] = 1 + (nextWord() % 100);
+			const data = createModbusData(registers);
+			for (const entry of Object.values(model)) {
+				if (!entry.readRegister) {
+					continue;
+				}
+				const value = entry.readRegister(data);
+				if (typeof value === "number") {
+					expect(Number.isFinite(value), entry.descr).to.equal(true);
+				}
+			}
+		}
 	});
 });
 
