@@ -284,6 +284,11 @@ Nach dem Upgrade sind RAM-/Coil- und EEPROM-Schreibzugriffe standardmäßig deak
 
 ## Entwicklung
 
+Weitere Nachweise und Betriebsdokumentation:
+
+- [Auditbericht 2026-11-16](docs/audit-2026-11-16.md)
+- [Deployment- und Rollback-Runbook](docs/deployment.md)
+
 ```bash
 npm ci
 npm run check
