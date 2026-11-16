@@ -105,6 +105,22 @@ describe("solar outlier filtering", () => {
 	});
 });
 
+describe("full-frame decoder robustness", () => {
+	it("keeps all RAM values available when upper DIP bits are set", async () => {
+		const client = new TristarMpptTCPModbus();
+		const registers = new Array<number>(92).fill(0);
+		registers[0] = 80;
+		registers[2] = 80;
+		registers[24] = 4096;
+		registers[48] = 0x8000;
+
+		await client.updateTristarData(registers, { installedWP: 0 } as ioBroker.AdapterConfig);
+
+		expect(client.tristarData["state.dip"].value).to.equal("1000000000000000");
+		expect(client.tristarData["batt.V"].value).to.equal(10);
+	});
+});
+
 describe("partial static register support", () => {
 	it("publishes available values without marking missing blocks as initialized", () => {
 		const client = new TristarMpptTCPModbus();
