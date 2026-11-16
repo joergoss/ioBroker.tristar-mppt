@@ -26,6 +26,14 @@ class TristarScale {
 exports.TristarScale = TristarScale;
 class TristarModel {
     constructor() {
+        this["info.firmware"] = {
+            descr: "Controller firmware version (BCD digits)",
+            unit: "",
+            role: "state",
+            type: "string",
+            readRegister: (tmd) => tmd.hr[4].toString(16).toUpperCase(),
+            value: "",
+        };
         this["adc.vb_f_med"] = {
             descr: "Battery voltage, filtered",
             unit: "V",
@@ -34,29 +42,77 @@ class TristarModel {
             readRegister: (tmd) => (0, tristarMpptUtil_1.round)((0, tristarMpptUtil_1.signedToInteger)(tmd.hr[24]) * tmd.scale.v, 2),
             value: 0,
         };
+        this["adc.vbTerm"] = {
+            descr: "Battery terminal voltage, filtered",
+            unit: "V",
+            role: "value.voltage",
+            type: "number",
+            readRegister: (tmd) => (0, tristarMpptUtil_1.round)((0, tristarMpptUtil_1.signedToInteger)(tmd.hr[25]) * tmd.scale.v, 2),
+            value: 0,
+        };
+        this["adc.p12"] = {
+            descr: "Internal 12 V supply, filtered",
+            unit: "V",
+            role: "value.voltage",
+            type: "number",
+            readRegister: (tmd) => (0, tristarMpptUtil_1.round)((0, tristarMpptUtil_1.signedToInteger)(tmd.hr[30]) * 18.612 * Math.pow(2, -15), 3),
+            value: 0,
+        };
+        this["adc.p3"] = {
+            descr: "Internal 3 V supply, filtered",
+            unit: "V",
+            role: "value.voltage",
+            type: "number",
+            readRegister: (tmd) => (0, tristarMpptUtil_1.round)((0, tristarMpptUtil_1.signedToInteger)(tmd.hr[31]) * 6.6 * Math.pow(2, -15), 3),
+            value: 0,
+        };
+        this["adc.pMeter"] = {
+            descr: "MeterBus supply voltage, filtered",
+            unit: "V",
+            role: "value.voltage",
+            type: "number",
+            readRegister: (tmd) => (0, tristarMpptUtil_1.round)((0, tristarMpptUtil_1.signedToInteger)(tmd.hr[32]) * 18.612 * Math.pow(2, -15), 3),
+            value: 0,
+        };
+        this["adc.p18"] = {
+            descr: "Internal 1.8 V supply, filtered",
+            unit: "V",
+            role: "value.voltage",
+            type: "number",
+            readRegister: (tmd) => (0, tristarMpptUtil_1.round)((0, tristarMpptUtil_1.signedToInteger)(tmd.hr[33]) * 3 * Math.pow(2, -15), 3),
+            value: 0,
+        };
+        this["adc.vRef"] = {
+            descr: "External reference voltage",
+            unit: "V",
+            role: "value.voltage",
+            type: "number",
+            readRegister: (tmd) => (0, tristarMpptUtil_1.round)((0, tristarMpptUtil_1.signedToInteger)(tmd.hr[34]) * 3 * Math.pow(2, -15), 3),
+            value: 0,
+        };
         // ------------------------------------------------------------------------------------------
         this["temp.HS"] = {
-            descr: "Heatsink temperature C √ -127 to + 127",
+            descr: "Heatsink temperature",
             role: "value.temperature",
             unit: "°C",
             type: "number",
-            readRegister: (tmd) => tmd.hr[35],
+            readRegister: (tmd) => (0, tristarMpptUtil_1.signedToInteger)(tmd.hr[35]),
             value: 0,
         };
         this["temp.RTS"] = {
-            descr: "RTS temperature (0x80 = disconnect)  C √ -127 to + 127",
+            descr: "Remote temperature sensor (null = disconnected)",
             role: "value.temperature",
             unit: "°C",
             type: "number",
-            readRegister: (tmd) => tmd.hr[36],
+            readRegister: (tmd) => tmd.hr[36] === 0x80 ? null : (0, tristarMpptUtil_1.signedToInteger)(tmd.hr[36]),
             value: 0,
         };
         this["temp.BATT"] = {
-            descr: "Battery regulation temperature C √ -127 to + 127",
+            descr: "Battery regulation temperature",
             role: "value.temperature",
             unit: "°C",
             type: "number",
-            readRegister: (tmd) => tmd.hr[37],
+            readRegister: (tmd) => (0, tristarMpptUtil_1.signedToInteger)(tmd.hr[37]),
             value: 0,
         };
         // ------------------------------------------------------------------------------------------
@@ -89,7 +145,7 @@ class TristarModel {
             role: "value",
             unit: "W",
             type: "number",
-            readRegister: (tmd) => (0, tristarMpptUtil_1.round)((0, tristarMpptUtil_1.signedToInteger)(tmd.hr[58]) * tmd.scale.p, 2),
+            readRegister: (tmd) => (0, tristarMpptUtil_1.round)(tmd.hr[58] * tmd.scale.p, 2),
             value: 0,
         };
         this["batt.Vmin"] = {
@@ -119,7 +175,7 @@ class TristarModel {
         this["batt.Af1m"] = {
             descr: "Charging current, filtered(τ ≈ 1min)",
             role: "value.current",
-            unit: "I",
+            unit: "A",
             type: "number",
             readRegister: (tmd) => (0, tristarMpptUtil_1.round)((0, tristarMpptUtil_1.signedToInteger)(tmd.hr[39]) * tmd.scale.i, 2),
             value: 0,
@@ -154,7 +210,7 @@ class TristarModel {
             role: "value",
             unit: "W",
             type: "number",
-            readRegister: (tmd) => (0, tristarMpptUtil_1.round)((0, tristarMpptUtil_1.signedToInteger)(tmd.hr[59]) * tmd.scale.p, 0),
+            readRegister: (tmd) => (0, tristarMpptUtil_1.round)(tmd.hr[59] * tmd.scale.p, 0),
             value: 0,
         };
         this["solar.InPowerPercent"] = {
@@ -162,7 +218,33 @@ class TristarModel {
             role: "value",
             unit: "%",
             type: "number",
-            readRegister: (tmd) => (0, tristarMpptUtil_1.round)((0, tristarMpptUtil_1.signedToInteger)(tmd.hr[59]) * tmd.scale.p / (tmd.config.installedWP / 100), 1),
+            readRegister: (tmd) => tmd.config.installedWP > 0
+                ? (0, tristarMpptUtil_1.round)(tmd.hr[59] * tmd.scale.p * 100 / tmd.config.installedWP, 1)
+                : null,
+            value: null,
+        };
+        this["solar.sweep.Pmax"] = {
+            descr: "Maximum array power found during the last sweep",
+            role: "value",
+            unit: "W",
+            type: "number",
+            readRegister: (tmd) => (0, tristarMpptUtil_1.round)(tmd.hr[60] * tmd.scale.p, 0),
+            value: 0,
+        };
+        this["solar.sweep.Vmp"] = {
+            descr: "Maximum power voltage found during the last sweep",
+            role: "value.voltage",
+            unit: "V",
+            type: "number",
+            readRegister: (tmd) => (0, tristarMpptUtil_1.round)((0, tristarMpptUtil_1.signedToInteger)(tmd.hr[61]) * tmd.scale.v, 2),
+            value: 0,
+        };
+        this["solar.sweep.Voc"] = {
+            descr: "Open-circuit voltage found during the last sweep",
+            role: "value.voltage",
+            unit: "V",
+            type: "number",
+            readRegister: (tmd) => (0, tristarMpptUtil_1.round)((0, tristarMpptUtil_1.signedToInteger)(tmd.hr[62]) * tmd.scale.v, 2),
             value: 0,
         };
         this["state.charge"] = {
@@ -170,8 +252,8 @@ class TristarModel {
             role: "state",
             unit: "",
             type: "string",
-            readRegister: (tmd) => tristarMpptUtil_1.charge_states[tmd.hr[50]],
-            value: 0,
+            readRegister: (tmd) => { var _a; return (_a = tristarMpptUtil_1.charge_states[tmd.hr[50]]) !== null && _a !== void 0 ? _a : `UNKNOWN (${tmd.hr[50]})`; },
+            value: "",
         };
         this["state.hourmeter"] = {
             descr: "hourmeter",
@@ -197,27 +279,43 @@ class TristarModel {
             readRegister: (tmd) => tmd.hr[56],
             value: 0,
         };
+        this["state.AhResettable"] = {
+            descr: "Charge amp-hours since the last reset",
+            role: "state",
+            unit: "Ah",
+            type: "number",
+            readRegister: (tmd) => (0, tristarMpptUtil_1.to32bitNumber)(tmd.hr[52], tmd.hr[53]) * 0.1,
+            value: 0,
+        };
+        this["state.AhTotal"] = {
+            descr: "Total charge amp-hours",
+            role: "state",
+            unit: "Ah",
+            type: "number",
+            readRegister: (tmd) => (0, tristarMpptUtil_1.to32bitNumber)(tmd.hr[54], tmd.hr[55]) * 0.1,
+            value: 0,
+        };
         this["state.faults"] = {
-            descr: "all Controller faults bitfield",
+            descr: "Active controller faults as a JSON array",
             role: "state",
             unit: "",
             type: "array",
             readRegister: (tmd) => JSON.stringify((0, tristarMpptUtil_1.resolveFaultsBitfield)(tmd.hr[44])),
-            value: 0,
+            value: "[]",
         };
         this["state.dip"] = {
-            descr: "all DIP switch positions bitfield",
+            descr: "DIP switch positions as an 8-bit string",
             role: "state",
             unit: "",
             type: "string",
             readRegister: (tmd) => (0, tristarMpptUtil_1.byteString)(tmd.hr[48]),
-            value: 0,
+            value: "00000000",
         };
         this["state.led"] = {
             descr: "State of LED indications",
             role: "state",
             unit: "",
-            type: "string",
+            type: "number",
             readRegister: (tmd) => tmd.hr[49],
             value: 0,
         };
@@ -226,16 +324,16 @@ class TristarModel {
             role: "state",
             unit: "",
             type: "string",
-            readRegister: (tmd) => tristarMpptUtil_1.ledState[tmd.hr[49]],
-            value: 0,
+            readRegister: (tmd) => { var _a; return (_a = tristarMpptUtil_1.ledState[tmd.hr[49]]) !== null && _a !== void 0 ? _a : `UNKNOWN (${tmd.hr[49]})`; },
+            value: "",
         };
         this["state.alarm"] = {
-            descr: "State of LED indications",
+            descr: "Active controller alarms as a JSON array",
             role: "state",
             unit: "",
             type: "array",
             readRegister: (tmd) => JSON.stringify((0, tristarMpptUtil_1.resolveAlarmBitfield)((0, tristarMpptUtil_1.to32bitNumber)(tmd.hr[46], tmd.hr[47]))),
-            value: 0,
+            value: "[]",
         };
         this["today.batt.Vmin"] = {
             descr: "battery minimal voltage",
@@ -253,12 +351,12 @@ class TristarModel {
             readRegister: (tmd) => (0, tristarMpptUtil_1.round)((0, tristarMpptUtil_1.signedToInteger)(tmd.hr[65]) * tmd.scale.v, 2),
             value: 0,
         };
-        this["today.batt.Imax"] = {
-            descr: "battery maximal current",
-            role: "value.current",
-            unit: "A",
+        this["today.solar.Vmax"] = {
+            descr: "Maximum daily array voltage",
+            role: "value.voltage",
+            unit: "V",
             type: "number",
-            readRegister: (tmd) => (0, tristarMpptUtil_1.round)((0, tristarMpptUtil_1.signedToInteger)(tmd.hr[65]) * tmd.scale.i, 2),
+            readRegister: (tmd) => (0, tristarMpptUtil_1.round)((0, tristarMpptUtil_1.signedToInteger)(tmd.hr[66]) * tmd.scale.v, 2),
             value: 0,
         };
         this["today.Ahc"] = {
@@ -290,7 +388,7 @@ class TristarModel {
             role: "value",
             unit: "W",
             type: "number",
-            readRegister: (tmd) => (0, tristarMpptUtil_1.round)((0, tristarMpptUtil_1.signedToInteger)(tmd.hr[70]) * tmd.scale.p, 0),
+            readRegister: (tmd) => (0, tristarMpptUtil_1.round)(tmd.hr[70] * tmd.scale.p, 0),
             value: 0,
         };
         this["today.batt.Tmin"] = {
@@ -298,7 +396,7 @@ class TristarModel {
             role: "value.temperature",
             unit: "°C",
             type: "number",
-            readRegister: (tmd) => tmd.hr[71],
+            readRegister: (tmd) => (0, tristarMpptUtil_1.signedToInteger)(tmd.hr[71]),
             value: 0,
         };
         this["today.batt.Tmax"] = {
@@ -306,59 +404,120 @@ class TristarModel {
             role: "value.temperature",
             unit: "°C",
             type: "number",
-            readRegister: (tmd) => tmd.hr[72],
+            readRegister: (tmd) => (0, tristarMpptUtil_1.signedToInteger)(tmd.hr[72]),
             value: 0,
         };
         this["today.fault"] = {
-            descr: "fault",
+            descr: "Daily controller fault bitfield",
             role: "state",
             unit: "",
             type: "number",
             readRegister: (tmd) => tmd.hr[73],
             value: 0,
         };
-        this["control.IbattRefSlave"] = {
-            descr: "Write a current value to this register to override the battery regulation.",
+        this["today.alarm"] = {
+            descr: "Daily controller alarms as a JSON array",
             role: "state",
-            unit: "I",
+            unit: "",
+            type: "array",
+            readRegister: (tmd) => JSON.stringify((0, tristarMpptUtil_1.resolveAlarmBitfield)((0, tristarMpptUtil_1.to32bitNumber)(tmd.hr[75], tmd.hr[76]))),
+            value: "[]",
+        };
+        this["today.timeAbsorption"] = {
+            descr: "Cumulative time in absorption today",
+            role: "state",
+            unit: "s",
             type: "number",
-            readRegister: (tmd) => (0, tristarMpptUtil_1.round)(tmd.hr[88] * tmd.scale.i * Math.pow(2, -15), 2),
-            writeRegister: (twd) => { return { register: 88, value: Math.floor(twd.value / twd.scale.i / Math.pow(2, -15)) }; },
+            readRegister: (tmd) => tmd.hr[77],
+            value: 0,
+        };
+        this["today.timeEqualize"] = {
+            descr: "Cumulative time in equalization today",
+            role: "state",
+            unit: "s",
+            type: "number",
+            readRegister: (tmd) => tmd.hr[78],
+            value: 0,
+        };
+        this["today.timeFloat"] = {
+            descr: "Cumulative time in float today",
+            role: "state",
+            unit: "s",
+            type: "number",
+            readRegister: (tmd) => tmd.hr[79],
+            value: 0,
+        };
+        this["control.IbattRefSlave"] = {
+            descr: "Battery current regulation override. Refresh at least every 60 seconds; a negative value disables slave control.",
+            role: "level.current",
+            unit: "A",
+            type: "number",
+            readRegister: (tmd) => (0, tristarMpptUtil_1.round)((0, tristarMpptUtil_1.signedToInteger)(tmd.hr[88]) * 80 * Math.pow(2, -15), 2),
+            writeRegister: (twd) => ({ register: 88, value: (0, tristarMpptUtil_1.encodeSignedRegister)(twd.value, 80 * Math.pow(2, -15)) }),
             value: 0,
         };
         this["control.VbattRefSlave"] = {
-            descr: "Write a voltage value to this register to override the battery regulation.",
-            role: "state",
+            descr: "Battery voltage regulation override. Refresh at least every 60 seconds; a negative value disables slave control.",
+            role: "level.voltage",
             unit: "V",
             type: "number",
-            readRegister: (tmd) => (0, tristarMpptUtil_1.round)(tmd.hr[89] * tmd.scale.v * Math.pow(2, -15), 2),
-            writeRegister: (twd) => { return { register: 89, value: Math.floor(twd.value / twd.scale.v / Math.pow(2, -15)) }; },
+            readRegister: (tmd) => (0, tristarMpptUtil_1.round)((0, tristarMpptUtil_1.signedToInteger)(tmd.hr[89]) * tmd.scale.v, 2),
+            writeRegister: (twd) => ({ register: 89, value: (0, tristarMpptUtil_1.encodeSignedRegister)(twd.value, twd.scale.v) }),
+            value: 0,
+        };
+        this["control.VarrayFixed"] = {
+            descr: "Fixed array voltage target. A non-zero value disables MPPT tracking.",
+            role: "level.voltage",
+            unit: "V",
+            type: "number",
+            readRegister: (tmd) => (0, tristarMpptUtil_1.round)((0, tristarMpptUtil_1.signedToInteger)(tmd.hr[90]) * tmd.scale.v, 2),
+            writeRegister: (twd) => {
+                if (twd.value < 0) {
+                    throw new Error("Array voltage target must not be negative");
+                }
+                return { register: 90, value: (0, tristarMpptUtil_1.encodeSignedRegister)(twd.value, twd.scale.v) };
+            },
+            value: 0,
+        };
+        this["control.VarrayFixedPct"] = {
+            descr: "Array voltage target as percent of Voc. A non-zero value disables MPPT tracking unless VarrayFixed is set.",
+            role: "level",
+            unit: "%",
+            type: "number",
+            readRegister: (tmd) => (0, tristarMpptUtil_1.round)(tmd.hr[91] * 100 * Math.pow(2, -16), 2),
+            writeRegister: (twd) => {
+                const value = twd.value;
+                if (value < 0 || value > 100) {
+                    throw new Error("Array voltage percentage must be between 0 and 100");
+                }
+                return { register: 91, value: value === 100 ? 0xffff : (0, tristarMpptUtil_1.encodeUnsignedRegister)(value, 100 * Math.pow(2, -16)) };
+            },
             value: 0,
         };
         this["control.ClearFaults"] = {
-            descr: "Clear faults (funktion ?)",
-            role: "state",
-            unit: "Coil",
+            descr: "Clear controller faults",
+            role: "button",
+            unit: "",
             type: "boolean",
-            writeCoil: (twd) => { return { register: 20, value: twd.value }; },
+            writeCoil: () => ({ register: 20, value: 1 }),
             value: false,
             valueOld: false
         };
         this["control.ClearAlarm"] = {
-            descr: "Clear alarms (funktion ?)",
-            role: "state",
-            unit: "Coil",
+            descr: "Clear controller alarms",
+            role: "button",
+            unit: "",
             type: "boolean",
-            writeCoil: (twd) => { return { register: 21, value: twd.value }; },
+            writeCoil: () => ({ register: 21, value: 1 }),
             value: false,
             valueOld: false
         };
         this["control.Reset"] = {
-            descr: "Reset control (respond and then reset?)",
-            role: "state",
-            unit: "Coil",
+            descr: "Reset the controller after the Modbus response",
+            role: "button",
+            unit: "",
             type: "boolean",
-            writeCoil: (twd) => { return { register: 255, value: twd.value }; },
+            writeCoil: () => ({ register: 255, value: 1 }),
             value: false,
             valueOld: false
         };

@@ -1,131 +1,128 @@
 // Tristar MODBUS
 
+import * as modbus from "jsmodbus";
+import * as net from "net";
 import { TristarHoldingRegisterArray, TristarDataEntry, TristarModbusData, TristarModel, TristarWriteSingleCoil, TristarWriteSingleHoldingRegister, TristarScale } from "./tristarMpptModel";
 
-/* eslint-disable @typescript-eslint/no-var-requires */
-// create a tcp modbus client
-const modbus = require("jsmodbus");
-const net = require("net");
+const SOCKET_TIMEOUT_MS = 10_000;
+
+interface ModbusClient {
+	readHoldingRegisters(address: number, quantity: number): Promise<{
+		response: { body: { valuesAsArray: ArrayLike<number> } };
+	}>;
+	writeSingleRegister(address: number, value: number): Promise<unknown>;
+	writeSingleCoil(address: number, value: boolean): Promise<unknown>;
+}
 
 export class TristarMpptTCPModbus {
 	tristarData = new TristarModel();
-	tristarScale: TristarScale | undefined; // ref for using in modbus write operations
-	sendHoldingRegisterQueue: Array<TristarWriteSingleHoldingRegister> = []
-	sendCoilQueue: Array<TristarWriteSingleCoil> = []
-
+	tristarScale: TristarScale | undefined;
+	lastHoldingRegisters: TristarHoldingRegisterArray = [];
+	private activeSocket: net.Socket | undefined;
+	private operation: Promise<void> = Promise.resolve();
+	private stopping = false;
 
 	async updateTristarData(hr: TristarHoldingRegisterArray, config: ioBroker.AdapterConfig): Promise<void> {
 		const tmd = new TristarModbusData(hr, config);
-		this.tristarScale = tmd.scale
+		this.tristarScale = tmd.scale;
 
-		for (const [, value] of Object.entries(this.tristarData)) {
-			const v = value as TristarDataEntry;
-
-			if (typeof v.readRegister === "function") {
-				v.valueOld = v.value;
-				v.value = v.readRegister(tmd)
+		for (const value of Object.values(this.tristarData)) {
+			const entry = value as TristarDataEntry;
+			if (typeof entry.readRegister === "function") {
+				entry.valueOld = entry.value;
+				entry.value = entry.readRegister(tmd);
 			}
-
-			// console.log("update - " + key + JSON.stringify(value))
 		}
 	}
 
-	async writeHoldingRegister(adapterConfig: ioBroker.AdapterConfig): Promise<void> {
-		// console.log("TristarMpptTCPModbus writeHoldingRegister " + JSON.stringify(this.sendHoldingRegisterQueue))
-
-		await this.connect(adapterConfig, async (client) => {
-			while (this.sendHoldingRegisterQueue.length > 0) {
-				const item = this.sendHoldingRegisterQueue.pop()
-				const response = await client.writeSingleRegister(item?.register, item?.value)
-				console.log("response writeSingleRegister " + JSON.stringify(response))
-			}
-		})
+	async writeHoldingRegister(adapterConfig: ioBroker.AdapterConfig, command: TristarWriteSingleHoldingRegister): Promise<void> {
+		await this.enqueue(() => this.connect(adapterConfig, async client => {
+			await client.writeSingleRegister(command.register, command.value);
+		}));
 	}
 
 	async readHoldingRegister(adapterConfig: ioBroker.AdapterConfig): Promise<void> {
-		// console.log("TristarMpptTCPModbus readHoldingRegister ***************")
-
-		await this.connect(adapterConfig, async (client) => {
-
-			const tristarHoldingRegister = await client.readHoldingRegisters(0, 90)
-			// console.log("tristarHoldingRegister" + JSON.stringify(tristarHoldingRegister))
-			// transform in older format
-			// const hr = { register: (tristarHoldingRegister.response as any)._body.valuesAsArray};
-			const hr = (tristarHoldingRegister.response as any)._body.valuesAsArray as TristarHoldingRegisterArray
-
-			await this.updateTristarData(hr, adapterConfig)
-		})
-	}
-
-	async writeCoil(adapterConfig: ioBroker.AdapterConfig): Promise<void> {
-		// console.log("TristarMpptTCPModbus writeCoil " + JSON.stringify(this.sendCoilQueue))
-
-		await this.connect(adapterConfig, async (client) => {
-			while (this.sendCoilQueue.length > 0) {
-				const item = this.sendCoilQueue.pop()
-				const response = await client.writeSingleCoil(item?.register, item?.value == 1 ? true : false)
-				console.log("response writeCoil " + JSON.stringify(response))
+		await this.enqueue(() => this.connect(adapterConfig, async client => {
+			const response = await client.readHoldingRegisters(0, 92);
+			const values = response.response.body.valuesAsArray;
+			const hr = Array.from(values);
+			if (hr.length < 92) {
+				throw new Error(`Expected 92 holding registers, received ${hr.length}`);
 			}
-		})
+			this.lastHoldingRegisters = hr;
+			await this.updateTristarData(hr, adapterConfig);
+		}));
 	}
 
-	async connect(adapterConfig: ioBroker.AdapterConfig, callback: (client: any) => Promise<void>): Promise<any> {
-		const config = adapterConfig
-		return new Promise<any>((resolve, reject) => {
-			console.log("connect to host: " + config.hostname)
-			console.log("connect to unitId: " + config.unitId)
+	async writeCoil(adapterConfig: ioBroker.AdapterConfig, command: TristarWriteSingleCoil): Promise<void> {
+		await this.enqueue(() => this.connect(adapterConfig, async client => {
+			await client.writeSingleCoil(command.register, command.value === 1);
+		}));
+	}
 
-			// eslint-disable-next-line @typescript-eslint/no-this-alias
-			const self = this;
+	private enqueue(task: () => Promise<void>): Promise<void> {
+		const result = this.operation.then(() => {
+			if (this.stopping) {
+				throw new Error("Modbus client is stopping");
+			}
+			return task();
+		});
+		this.operation = result.catch(() => undefined);
+		return result;
+	}
+
+	private async connect(adapterConfig: ioBroker.AdapterConfig, callback: (client: ModbusClient) => Promise<void>): Promise<void> {
+		if (this.stopping) {
+			throw new Error("Modbus client is stopping");
+		}
+
+		return new Promise<void>((resolve, reject) => {
+			const netSocket = new net.Socket();
+			this.activeSocket = netSocket;
+			let settled = false;
+
+			const finish = (error?: unknown): void => {
+				if (settled) {
+					return;
+				}
+				settled = true;
+				netSocket.setTimeout(0);
+				if (this.activeSocket === netSocket) {
+					this.activeSocket = undefined;
+				}
+				if (error) {
+					netSocket.destroy();
+					reject(error);
+				} else {
+					netSocket.end();
+					resolve();
+				}
+			};
 
 			try {
-				// create a modbus client
-				const netSocket = new net.Socket()
-				// eslint-disable-next-line @typescript-eslint/no-unused-vars
-				const client = new modbus.client.TCP(netSocket, config.unitId);
-
-				netSocket.connect({
-					"host": config.hostname, //192.168.1.32 TSMPPT10480676
-					"port": config.port,
-					// 'autoReconnect': true,
-					// 'reconnectTimeout': 4000,
-					// 'timeout': 8000,
-				})
-
-				netSocket.on("connect", async function () {
-					console.log("connected ...")
-
-					// call modbus command
-					try {
-						await callback(client)
-						netSocket.end();
-						resolve(self.tristarData);
-					}
-
-					catch (Exception) {
-						console.log("ERROR in callback" + JSON.stringify(Exception))
-						netSocket.end();
-						reject(Exception);
-					}
-
-
+				const client = new modbus.client.TCP(netSocket, adapterConfig.unitId) as ModbusClient;
+				netSocket.once("error", finish);
+				netSocket.setTimeout(SOCKET_TIMEOUT_MS, () => {
+					finish(new Error(`Modbus connection timed out after ${SOCKET_TIMEOUT_MS} ms`));
 				});
-
-
-				netSocket.on("error", function (err: any) {
-					console.log("netSocket ERROR" + JSON.stringify(err))
-					reject(err);
-
-				})
-
-			} catch (Exception) {
-				console.log("ERROR in connect" + JSON.stringify(Exception))
-				reject(Exception);
+				netSocket.once("connect", () => {
+					callback(client).then(() => finish(), finish);
+				});
+				netSocket.connect({
+					host: adapterConfig.hostname,
+					port: adapterConfig.port,
+				});
+			} catch (error) {
+				finish(error);
 			}
-
-		})
-
+		});
 	}
 
-
+	close(): void {
+		this.stopping = true;
+		if (this.activeSocket) {
+			this.activeSocket.destroy(new Error("Adapter is stopping"));
+			this.activeSocket = undefined;
+		}
+	}
 }

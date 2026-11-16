@@ -16,7 +16,33 @@ export function round (value: number, decimals: number): number {
 }
 
 export function to32bitNumber (hi: number, lo: number) : number {
-	return (hi << 16) + lo
+	return hi * 0x10000 + lo;
+}
+
+/**
+ * Converts a physical value to a signed 16-bit Modbus register and returns its
+ * unsigned wire representation.
+ */
+export function encodeSignedRegister(value: number, scale: number): number {
+	if (!Number.isFinite(value) || !Number.isFinite(scale) || scale <= 0) {
+		throw new Error("Value and scale must be finite numbers; scale must be positive");
+	}
+	const rawValue = Math.round(value / scale);
+	if (rawValue < -0x8000 || rawValue > 0x7fff) {
+		throw new Error(`Value ${value} is outside the signed 16-bit register range`);
+	}
+	return rawValue & 0xffff;
+}
+
+export function encodeUnsignedRegister(value: number, scale: number): number {
+	if (!Number.isFinite(value) || !Number.isFinite(scale) || scale <= 0) {
+		throw new Error("Value and scale must be finite numbers; scale must be positive");
+	}
+	const rawValue = Math.round(value / scale);
+	if (rawValue < 0 || rawValue > 0xffff) {
+		throw new Error(`Value ${value} is outside the unsigned 16-bit register range`);
+	}
+	return rawValue;
 }
 
 const faultsTextArray = [
