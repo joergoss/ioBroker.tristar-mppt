@@ -106,7 +106,7 @@ Die historischen Daten zeigen gelegentliche einsekündige Solar-Strom-/Leistungs
 | `state.AhTotal` | `0x0036/0x0037` | Ah | Gesamte Amperestunden |
 | `state.faults` | `0x002C` | – | Aktive Controller-Faults als JSON-Array |
 | `state.alarm` | `0x002E/0x002F` | – | Aktive Controller-Alarme als JSON-Array |
-| `state.dip` | `0x0030` | – | DIP-Schalter als 8-Bit-Text; Bit 0 entspricht Schalter 1 |
+| `state.dip` | `0x0030` | – | Vollständiges 16-Bit-Bitfeld als Text; Bit 0 entspricht Schalter 1 |
 | `state.led` | `0x0031` | – | Numerischer LED-Zustand |
 | `state.ledText` | `0x0031` | – | LED-Zustand als Text |
 | `state.equalizeTriggered` | Coil `0x0000` | – | IST-Status „Equalize ausgelöst“, read-only |
@@ -278,6 +278,8 @@ Der frühere Datenpunkt `today.batt.Imax` war kein vom Protokoll dokumentierter 
 
 Nach dem Upgrade sind RAM-/Coil- und EEPROM-Schreibzugriffe standardmäßig deaktiviert. Bestehende Automationen müssen nach Sicherheitsprüfung ausdrücklich über `enableControlWrites` bzw. `enableEepromWrites` wieder aktiviert werden.
 
+`state.dip` wird von einem 8-Bit- auf das dokumentierte 16-Bit-Textformat erweitert. Dadurch können auch gesetzte obere Bits nicht mehr den gesamten RAM-Poll abbrechen (#13).
+
 ## Entwicklung
 
 ```bash
@@ -303,6 +305,7 @@ Die Register-, Konvertierungs- und Kommandotests verwenden Fixtures bzw. Mocks u
 - (joerg) Active-TCP-, EEPROM-Historie-, Ladeeinstellungs- und Coil-Status-Coverage ergänzt (#12).
 - (joerg) Allowlistbasierte EEPROM-Ladeschreibzugriffe mit Opt-in, Fresh-Read, Readback und ohne Auto-Reset (#11).
 - (joerg) Sämtliche RAM-/Coil-/EEPROM-Schreibzugriffe standardmäßig deaktiviert und durch getrennte Opt-ins plus Runtime-Guards geschützt (#4, #11).
+- (joerg) DIP-Bitfeld vollständig auf 16 Bit korrigiert; exhaustive Konvertierungs- und deterministische Fuzz-Tests ergänzt (#13).
 
 ### 0.0.2 (2022-01-15)
 - (joerg) initial release

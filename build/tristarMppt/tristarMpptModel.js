@@ -342,12 +342,12 @@ class TristarModel {
             value: "[]",
         };
         this["state.dip"] = {
-            descr: "DIP switch positions as an 8-bit string",
+            descr: "DIP switch positions as a 16-bit string",
             role: "state",
             unit: "",
             type: "string",
-            readRegister: (tmd) => (0, tristarMpptUtil_1.byteString)(tmd.hr[48]),
-            value: "00000000",
+            readRegister: (tmd) => (0, tristarMpptUtil_1.wordString)(tmd.hr[48]),
+            value: "0000000000000000",
         };
         this["state.led"] = {
             descr: "State of LED indications",

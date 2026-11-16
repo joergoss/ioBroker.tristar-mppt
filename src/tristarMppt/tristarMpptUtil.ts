@@ -153,6 +153,13 @@ export function byteString(n:number): string {
 	return ("000000000" + n.toString(2)).substr(-8)
 }
 
+export function wordString(n: number): string {
+	if (!Number.isInteger(n) || n < 0 || n > 0xffff) {
+		throw new Error(`${n} does not fit in a 16-bit word`);
+	}
+	return n.toString(2).padStart(16, "0");
+}
+
 export function splitIdFromAdapter(str: string): string  {
 	const delimiter = "."
 	const start = 2
