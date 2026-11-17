@@ -1,131 +1,329 @@
 // Tristar MODBUS
 
+import * as modbus from "jsmodbus";
+import * as net from "net";
+import { SolarSnapshotFilter } from "./solarSnapshotFilter";
 import { TristarHoldingRegisterArray, TristarDataEntry, TristarModbusData, TristarModel, TristarWriteSingleCoil, TristarWriteSingleHoldingRegister, TristarScale } from "./tristarMpptModel";
+import { TristarStaticModel } from "./tristarMpptStaticModel";
+import { signedToInteger } from "./tristarMpptUtil";
 
-/* eslint-disable @typescript-eslint/no-var-requires */
-// create a tcp modbus client
-const modbus = require("jsmodbus");
-const net = require("net");
+const SOCKET_TIMEOUT_MS = 10_000;
+const STATIC_REGISTER_BLOCKS = [
+	{ start: 0x1000, count: 1 },
+	{ start: 0x100f, count: 10 },
+	{ start: 0x101d, count: 9 },
+	{ start: 0x1026, count: 11 },
+	{ start: 0x151b, count: 5 },
+	{ start: 0x1520, count: 2 },
+	{ start: 0xe000, count: 12 },
+	{ start: 0xe00d, count: 6 },
+	{ start: 0xe015, count: 6 },
+	{ start: 0xe01d, count: 1 },
+	{ start: 0xe020, count: 2 },
+	{ start: 0xe080, count: 13 },
+	{ start: 0xe0c0, count: 4 },
+	{ start: 0xe0cc, count: 2 },
+] as const;
+
+interface ModbusClient {
+	readHoldingRegisters(address: number, quantity: number): Promise<{
+		response: { body: { valuesAsArray: ArrayLike<number> } };
+	}>;
+	readInputRegisters(address: number, quantity: number): Promise<{
+		response: { body: { valuesAsArray: ArrayLike<number> } };
+	}>;
+	readCoils(address: number, quantity: number): Promise<{
+		response: { body: { valuesAsArray: ArrayLike<number | boolean> } };
+	}>;
+	writeSingleRegister(address: number, value: number): Promise<unknown>;
+	writeSingleCoil(address: number, value: boolean): Promise<unknown>;
+}
 
 export class TristarMpptTCPModbus {
-	tristarData = new TristarModel();
-	tristarScale: TristarScale | undefined; // ref for using in modbus write operations
-	sendHoldingRegisterQueue: Array<TristarWriteSingleHoldingRegister> = []
-	sendCoilQueue: Array<TristarWriteSingleCoil> = []
-
+	tristarData: Record<string, TristarDataEntry> = { ...new TristarModel(), ...new TristarStaticModel() };
+	tristarScale: TristarScale | undefined;
+	lastHoldingRegisters: TristarHoldingRegisterArray = [];
+	lastStaticRegisters = new Map<number, number>();
+	staticDataLoaded = false;
+	staticDataStale = true;
+	scaleSignature: string | undefined;
+	private eepromWriteVersion = 0;
+	private activeSocket: net.Socket | undefined;
+	private operation: Promise<void> = Promise.resolve();
+	private readonly solarFilter = new SolarSnapshotFilter();
+	private stopping = false;
 
 	async updateTristarData(hr: TristarHoldingRegisterArray, config: ioBroker.AdapterConfig): Promise<void> {
+		const scaleSignature = hr.slice(0, 4).join(",");
+		if (this.scaleSignature !== undefined && this.scaleSignature !== scaleSignature) {
+			this.invalidateStaticData();
+		}
+		this.scaleSignature = scaleSignature;
 		const tmd = new TristarModbusData(hr, config);
-		this.tristarScale = tmd.scale
+		this.tristarScale = tmd.scale;
+		tmd.filteredSolar = this.solarFilter.add(hr.slice(0, 4).join(","), {
+			current: signedToInteger(hr[29]) * tmd.scale.i,
+			power: hr[59] * tmd.scale.p,
+		});
 
-		for (const [, value] of Object.entries(this.tristarData)) {
-			const v = value as TristarDataEntry;
-
-			if (typeof v.readRegister === "function") {
-				v.valueOld = v.value;
-				v.value = v.readRegister(tmd)
+		for (const value of Object.values(this.tristarData)) {
+			const entry = value as TristarDataEntry;
+			if (!entry.source && typeof entry.readRegister === "function") {
+				entry.valueOld = entry.value;
+				entry.value = entry.readRegister(tmd);
+				entry.initialized = true;
 			}
-
-			// console.log("update - " + key + JSON.stringify(value))
 		}
 	}
 
-	async writeHoldingRegister(adapterConfig: ioBroker.AdapterConfig): Promise<void> {
-		// console.log("TristarMpptTCPModbus writeHoldingRegister " + JSON.stringify(this.sendHoldingRegisterQueue))
-
-		await this.connect(adapterConfig, async (client) => {
-			while (this.sendHoldingRegisterQueue.length > 0) {
-				const item = this.sendHoldingRegisterQueue.pop()
-				const response = await client.writeSingleRegister(item?.register, item?.value)
-				console.log("response writeSingleRegister " + JSON.stringify(response))
+	private invalidateStaticData(): void {
+		for (const entry of Object.values(this.tristarData)) {
+			if (entry.source === "network" || entry.source === "eeprom") {
+				entry.valueOld = entry.value;
+				entry.value = null;
+				entry.initialized = false;
+				entry.rawValue = undefined;
 			}
-		})
+		}
+		this.lastStaticRegisters = new Map<number, number>();
+		this.staticDataLoaded = false;
+		this.staticDataStale = true;
+	}
+
+	async writeHoldingRegister(adapterConfig: ioBroker.AdapterConfig, command: TristarWriteSingleHoldingRegister, expectedScaleSignature: string): Promise<void> {
+		await this.enqueue(() => {
+			this.assertScaleSignature(expectedScaleSignature);
+			return this.connect(adapterConfig, async client => {
+				await client.writeSingleRegister(command.register, command.value);
+			});
+		});
 	}
 
 	async readHoldingRegister(adapterConfig: ioBroker.AdapterConfig): Promise<void> {
-		// console.log("TristarMpptTCPModbus readHoldingRegister ***************")
-
-		await this.connect(adapterConfig, async (client) => {
-
-			const tristarHoldingRegister = await client.readHoldingRegisters(0, 90)
-			// console.log("tristarHoldingRegister" + JSON.stringify(tristarHoldingRegister))
-			// transform in older format
-			// const hr = { register: (tristarHoldingRegister.response as any)._body.valuesAsArray};
-			const hr = (tristarHoldingRegister.response as any)._body.valuesAsArray as TristarHoldingRegisterArray
-
-			await this.updateTristarData(hr, adapterConfig)
-		})
+		try {
+			await this.enqueue(() => this.connect(adapterConfig, async client => {
+				const response = await client.readHoldingRegisters(0, 92);
+				const values = response.response.body.valuesAsArray;
+				const hr = Array.from(values);
+				if (hr.length < 92) {
+					throw new Error(`Expected 92 holding registers, received ${hr.length}`);
+				}
+				this.lastHoldingRegisters = hr;
+				await this.updateTristarData(hr, adapterConfig);
+			}));
+		} catch (error) {
+			this.tristarScale = undefined;
+			this.solarFilter.reset();
+			throw error;
+		}
 	}
 
-	async writeCoil(adapterConfig: ioBroker.AdapterConfig): Promise<void> {
-		// console.log("TristarMpptTCPModbus writeCoil " + JSON.stringify(this.sendCoilQueue))
-
-		await this.connect(adapterConfig, async (client) => {
-			while (this.sendCoilQueue.length > 0) {
-				const item = this.sendCoilQueue.pop()
-				const response = await client.writeSingleCoil(item?.register, item?.value == 1 ? true : false)
-				console.log("response writeCoil " + JSON.stringify(response))
+	async readCoilStates(adapterConfig: ioBroker.AdapterConfig): Promise<void> {
+		await this.enqueue(() => this.connect(adapterConfig, async client => {
+			const response = await client.readCoils(0, 3);
+			const coils = Array.from(response.response.body.valuesAsArray).slice(0, 3);
+			if (coils.length < 3) {
+				throw new Error(`Expected at least 3 coils, received ${coils.length}`);
 			}
-		})
+			for (const entry of Object.values(this.tristarData)) {
+				if (entry.source === "coil" && entry.readCoil) {
+					entry.valueOld = entry.value;
+					entry.value = entry.readCoil(coils);
+					entry.initialized = true;
+				}
+			}
+		}));
 	}
 
-	async connect(adapterConfig: ioBroker.AdapterConfig, callback: (client: any) => Promise<void>): Promise<any> {
-		const config = adapterConfig
-		return new Promise<any>((resolve, reject) => {
-			console.log("connect to host: " + config.hostname)
-			console.log("connect to unitId: " + config.unitId)
-
-			// eslint-disable-next-line @typescript-eslint/no-this-alias
-			const self = this;
-
+	async readStaticRegisters(adapterConfig: ioBroker.AdapterConfig): Promise<void> {
+		if (this.lastHoldingRegisters.length < 92) {
+			throw new Error("Read RAM scaling values before static registers");
+		}
+		const writeVersion = this.eepromWriteVersion;
+		const readScaleSignature = this.scaleSignature;
+		const registers = new Map<number, number>();
+		const errors: string[] = [];
+		for (const block of STATIC_REGISTER_BLOCKS) {
 			try {
-				// create a modbus client
-				const netSocket = new net.Socket()
-				// eslint-disable-next-line @typescript-eslint/no-unused-vars
-				const client = new modbus.client.TCP(netSocket, config.unitId);
+				// Only one block occupies the FIFO at a time. RAM polls and writes
+				// can be interleaved between blocks instead of waiting for all blocks.
+				const values = await this.enqueue(() => this.readRegisterBlock(adapterConfig, block.start, block.count));
+				values.forEach((value, index) => registers.set(block.start + index, value));
+			} catch (error) {
+				errors.push(`0x${block.start.toString(16)}: ${error instanceof Error ? error.message : String(error)}`);
+			}
+		}
+		if (writeVersion !== this.eepromWriteVersion || readScaleSignature !== this.scaleSignature) {
+			this.staticDataStale = true;
+			throw new Error("EEPROM or scaling changed during static refresh; discard mixed snapshot and refresh again");
+		}
+		this.lastStaticRegisters = registers;
+		errors.push(...this.updateStaticData(registers, adapterConfig));
+		this.staticDataLoaded = errors.length === 0;
+		this.staticDataStale = false;
+		if (errors.length > 0) {
+			throw new Error(`Some static register blocks are unavailable: ${errors.join("; ")}`);
+		}
+	}
 
-				netSocket.connect({
-					"host": config.hostname, //192.168.1.32 TSMPPT10480676
-					"port": config.port,
-					// 'autoReconnect': true,
-					// 'reconnectTimeout': 4000,
-					// 'timeout': 8000,
-				})
+	updateStaticData(registers: Map<number, number>, config: ioBroker.AdapterConfig): string[] {
+		const tmd = new TristarModbusData(this.lastHoldingRegisters, config, null, registers);
+		const errors: string[] = [];
+		for (const entry of Object.values(this.tristarData)) {
+			if (entry.source && entry.source !== "coil" && entry.readRegister) {
+				try {
+					entry.valueOld = entry.value;
+					entry.value = entry.readRegister(tmd);
+					entry.rawValue = entry.registerAddress === undefined ? undefined : tmd.readStatic(entry.registerAddress);
+					entry.initialized = true;
+				} catch (error) {
+					entry.value = null;
+					entry.initialized = false;
+					entry.rawValue = undefined;
+					errors.push(`${entry.descr}: ${error instanceof Error ? error.message : String(error)}`);
+				}
+			}
+		}
+		return errors;
+	}
 
-				netSocket.on("connect", async function () {
-					console.log("connected ...")
+	private async readRegisterBlock(adapterConfig: ioBroker.AdapterConfig, start: number, count: number): Promise<number[]> {
+		let result: number[] = [];
+		await this.connect(adapterConfig, async client => {
+			// Active TCP values are RAM/FC03. The EEPROM table, including its
+			// network settings, is explicitly documented as input registers/FC04.
+			const response = start >= 0x151b
+				? await client.readInputRegisters(start, count)
+				: await client.readHoldingRegisters(start, count);
+			result = Array.from(response.response.body.valuesAsArray);
+			if (result.length !== count) {
+				throw new Error(`Expected ${count} registers at 0x${start.toString(16)}, received ${result.length}`);
+			}
+		});
+		return result;
+	}
 
-					// call modbus command
-					try {
-						await callback(client)
-						netSocket.end();
-						resolve(self.tristarData);
-					}
+	async writeEepromRegister(adapterConfig: ioBroker.AdapterConfig, command: TristarWriteSingleHoldingRegister, expectedRaw: number, expectedScaleSignature: string): Promise<void> {
+		await this.enqueue(async () => {
+			this.assertScaleSignature(expectedScaleSignature);
+			let writePossiblySent = false;
+			try {
+				const before = await this.readRegisterBlock(adapterConfig, command.register, 1);
+				if (before[0] !== expectedRaw) {
+					throw new Error(`EEPROM value at 0x${command.register.toString(16)} changed; refresh and review before writing`);
+				}
 
-					catch (Exception) {
-						console.log("ERROR in callback" + JSON.stringify(Exception))
-						netSocket.end();
-						reject(Exception);
-					}
-
-
+				// Exactly one write. No automatic retry, clear-faults or controller reset.
+				await this.connect(adapterConfig, async client => {
+					writePossiblySent = true;
+					await client.writeSingleRegister(command.register, command.value);
 				});
 
-
-				netSocket.on("error", function (err: any) {
-					console.log("netSocket ERROR" + JSON.stringify(err))
-					reject(err);
-
-				})
-
-			} catch (Exception) {
-				console.log("ERROR in connect" + JSON.stringify(Exception))
-				reject(Exception);
+				let after: number[];
+				try {
+					after = await this.readRegisterBlock(adapterConfig, command.register, 1);
+				} catch (error) {
+					throw new Error(`EEPROM write was sent but readback failed; do not retry blindly: ${error instanceof Error ? error.message : String(error)}`);
+				}
+				if (after[0] !== command.value) {
+					throw new Error(`EEPROM readback mismatch at 0x${command.register.toString(16)}: wrote ${command.value}, read ${after[0]}`);
+				}
+				this.lastStaticRegisters.set(command.register, after[0]);
+				this.updateStaticData(this.lastStaticRegisters, adapterConfig);
+			} finally {
+				if (writePossiblySent) {
+					// Even a lost response or failed readback may leave the device changed.
+					// Invalidate any concurrently collected mixed static snapshot.
+					this.eepromWriteVersion++;
+					this.staticDataStale = true;
+				}
 			}
-
-		})
-
+		});
 	}
 
+	async writeCoil(adapterConfig: ioBroker.AdapterConfig, command: TristarWriteSingleCoil): Promise<void> {
+		await this.enqueue(() => this.connect(adapterConfig, async client => {
+			await client.writeSingleCoil(command.register, command.value === 1);
+		}));
+	}
 
+	private enqueue<T>(task: () => Promise<T>): Promise<T> {
+		const result = this.operation.then(() => {
+			if (this.stopping) {
+				throw new Error("Modbus client is stopping");
+			}
+			return task();
+		});
+		this.operation = result.then(() => undefined, () => undefined);
+		return result;
+	}
+
+	private assertScaleSignature(expected: string): void {
+		if (!this.tristarScale || this.scaleSignature !== expected) {
+			throw new Error("Scaling values changed or are invalid; discard command without hardware write");
+		}
+	}
+
+	private async connect(adapterConfig: ioBroker.AdapterConfig, callback: (client: ModbusClient) => Promise<void>): Promise<void> {
+		if (this.stopping) {
+			throw new Error("Modbus client is stopping");
+		}
+
+		return new Promise<void>((resolve, reject) => {
+			const netSocket = new net.Socket();
+			this.activeSocket = netSocket;
+			let settled = false;
+
+			const finish = (error?: unknown): void => {
+				if (settled) {
+					return;
+				}
+				settled = true;
+				netSocket.setTimeout(0);
+				if (this.activeSocket === netSocket) {
+					this.activeSocket = undefined;
+				}
+				if (error) {
+					netSocket.destroy();
+					reject(error);
+				} else {
+					netSocket.end();
+					resolve();
+				}
+			};
+
+			try {
+				const client = new modbus.client.TCP(netSocket, adapterConfig.unitId) as ModbusClient;
+				netSocket.once("error", finish);
+				netSocket.once("end", () => {
+					// The TriStar may send a valid response and FIN together. Let the
+					// resolved Modbus promise finish first, then reject a bare FIN.
+					setImmediate(() => {
+						finish(new Error("Modbus peer closed the connection before the operation completed"));
+					});
+				});
+				netSocket.setTimeout(SOCKET_TIMEOUT_MS, () => {
+					finish(new Error(`Modbus connection timed out after ${SOCKET_TIMEOUT_MS} ms`));
+				});
+				netSocket.once("connect", () => {
+					callback(client).then(() => finish(), finish);
+				});
+				netSocket.connect({
+					host: adapterConfig.hostname,
+					port: adapterConfig.port,
+				});
+			} catch (error) {
+				finish(error);
+			}
+		});
+	}
+
+	close(): void {
+		this.stopping = true;
+		this.solarFilter.reset();
+		if (this.activeSocket) {
+			this.activeSocket.destroy(new Error("Adapter is stopping"));
+			this.activeSocket = undefined;
+		}
+	}
 }

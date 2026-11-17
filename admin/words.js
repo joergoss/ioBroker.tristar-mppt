@@ -4,38 +4,46 @@
 systemDictionary = {
 	"tristar-mppt adapter settings": {
 		"en": "Adapter settings for tristar-mppt",
-		"de": "Adaptereinstellungen für tristar-mppt",
-		"ru": "Настройки адаптера для tristar-mppt",
-		"pt": "Configurações do adaptador para tristar-mppt",
-		"nl": "Adapterinstellingen voor tristar-mppt",
-		"fr": "Paramètres d'adaptateur pour tristar-mppt",
-		"it": "Impostazioni dell'adattatore per tristar-mppt",
-		"es": "Ajustes del adaptador para tristar-mppt",
-		"pl": "Ustawienia adaptera dla tristar-mppt",
-		"zh-cn": "tristar-mppt的适配器设置"
+		"de": "Adaptereinstellungen für tristar-mppt"
 	},
-	"option1": {
-		"en": "option1",
-		"de": "Option 1",
-		"ru": "Опция 1",
-		"pt": "Opção 1",
-		"nl": "Optie 1",
-		"fr": "Option 1",
-		"it": "opzione 1",
-		"es": "Opción 1",
-		"pl": "opcja 1",
-		"zh-cn": "选项1"
+	"Hostname": {
+		"en": "Hostname or IP address",
+		"de": "Hostname oder IP-Adresse"
 	},
-	"option2": {
-		"en": "option2",
-		"de": "Option 2",
-		"ru": "вариант 2",
-		"pt": "opção 2",
-		"nl": "Optie 2",
-		"fr": "Option 2",
-		"it": "opzione 2",
-		"es": "opcion 2",
-		"pl": "Opcja 2",
-		"zh-cn": "选项2"
+	"Port": {
+		"en": "Modbus TCP port",
+		"de": "Modbus-TCP-Port"
+	},
+	"Unit ID": {
+		"en": "Modbus unit ID",
+		"de": "Modbus-Unit-ID"
+	},
+	"Polling interval in seconds": {
+		"en": "Polling interval in seconds (minimum 1)",
+		"de": "Abfrageintervall in Sekunden (mindestens 1)"
+	},
+	"Installed solar power in Wp": {
+		"en": "Installed solar power in Wp",
+		"de": "Installierte Solarleistung in Wp"
+	},
+	"Use 0 to disable the power percentage": {
+		"en": "Use 0 to disable the power percentage",
+		"de": "0 deaktiviert die Prozentanzeige der Solarleistung"
+	},
+	"Allow RAM control and coil commands": {
+		"en": "Allow RAM control and coil commands",
+		"de": "RAM-Steuer- und Coil-Kommandos erlauben"
+	},
+	"Enables slave-control, fixed array targets, clear commands and controller reset. Disabled by default.": {
+		"en": "Enables slave-control, fixed array targets, clear commands and controller reset. Disabled by default.",
+		"de": "Aktiviert Slave-Control, feste Array-Ziele, Clear-Kommandos und Controller-Reset. Standardmäßig deaktiviert."
+	},
+	"Allow guarded EEPROM charging writes": {
+		"en": "Allow guarded EEPROM charging writes",
+		"de": "Abgesicherte EEPROM-Schreibzugriffe auf Ladeeinstellungen erlauben"
+	},
+	"EEPROM writes can damage batteries, cause an EEPROM-changed fault and require a manual controller reset. Never enabled by default.": {
+		"en": "EEPROM writes can damage batteries, cause an EEPROM-changed fault and require a manual controller reset. Never enabled by default.",
+		"de": "EEPROM-Schreibzugriffe können Batterien beschädigen, einen EEPROM-Changed-Fault auslösen und erfordern einen manuellen Controller-Reset. Standardmäßig immer deaktiviert."
 	}
 };

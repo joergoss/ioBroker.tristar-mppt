@@ -1,6 +1,16 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.splitIdFromAdapter = exports.byteString = exports.ledState = exports.charge_states = exports.resolveAlarmBitfield = exports.alarmTextArray = exports.resolveFaultsBitfield = exports.to32bitNumber = exports.round = exports.signedToInteger = void 0;
+exports.ledState = exports.charge_states = exports.alarmTextArray = void 0;
+exports.signedToInteger = signedToInteger;
+exports.round = round;
+exports.to32bitNumber = to32bitNumber;
+exports.encodeSignedRegister = encodeSignedRegister;
+exports.encodeUnsignedRegister = encodeUnsignedRegister;
+exports.resolveFaultsBitfield = resolveFaultsBitfield;
+exports.resolveAlarmBitfield = resolveAlarmBitfield;
+exports.byteString = byteString;
+exports.wordString = wordString;
+exports.splitIdFromAdapter = splitIdFromAdapter;
 // helper function to convert signed value to integer
 function signedToInteger(value) {
     if ((value & 0x8000) > 0) {
@@ -8,7 +18,6 @@ function signedToInteger(value) {
     }
     return value;
 }
-exports.signedToInteger = signedToInteger;
 function round(value, decimals) {
     const d = Math.pow(10, decimals);
     if (!isNaN(value)) {
@@ -16,11 +25,33 @@ function round(value, decimals) {
     }
     return 0;
 }
-exports.round = round;
 function to32bitNumber(hi, lo) {
-    return (hi << 16) + lo;
+    return hi * 0x10000 + lo;
 }
-exports.to32bitNumber = to32bitNumber;
+/**
+ * Converts a physical value to a signed 16-bit Modbus register and returns its
+ * unsigned wire representation.
+ */
+function encodeSignedRegister(value, scale) {
+    if (!Number.isFinite(value) || !Number.isFinite(scale) || scale <= 0) {
+        throw new Error("Value and scale must be finite numbers; scale must be positive");
+    }
+    const rawValue = Math.round(value / scale);
+    if (rawValue < -0x8000 || rawValue > 0x7fff) {
+        throw new Error(`Value ${value} is outside the signed 16-bit register range`);
+    }
+    return rawValue & 0xffff;
+}
+function encodeUnsignedRegister(value, scale) {
+    if (!Number.isFinite(value) || !Number.isFinite(scale) || scale <= 0) {
+        throw new Error("Value and scale must be finite numbers; scale must be positive");
+    }
+    const rawValue = Math.round(value / scale);
+    if (rawValue < 0 || rawValue > 0xffff) {
+        throw new Error(`Value ${value} is outside the unsigned 16-bit register range`);
+    }
+    return rawValue;
+}
 const faultsTextArray = [
     "overcurrent",
     "FETs shorted",
@@ -48,7 +79,6 @@ function resolveFaultsBitfield(value) {
     }
     return r;
 }
-exports.resolveFaultsBitfield = resolveFaultsBitfield;
 exports.alarmTextArray = [
     "RTS open",
     "RTS shorted",
@@ -84,7 +114,6 @@ function resolveAlarmBitfield(value) {
     }
     return r;
 }
-exports.resolveAlarmBitfield = resolveAlarmBitfield;
 exports.charge_states = {
     0: "START",
     1: "NIGHT_CHECK",
@@ -125,12 +154,16 @@ function byteString(n) {
     }
     return ("000000000" + n.toString(2)).substr(-8);
 }
-exports.byteString = byteString;
+function wordString(n) {
+    if (!Number.isInteger(n) || n < 0 || n > 0xffff) {
+        throw new Error(`${n} does not fit in a 16-bit word`);
+    }
+    return n.toString(2).padStart(16, "0");
+}
 function splitIdFromAdapter(str) {
     const delimiter = ".";
     const start = 2;
     const tokens = str.split(delimiter).slice(start);
     return tokens.join(delimiter);
 }
-exports.splitIdFromAdapter = splitIdFromAdapter;
 //# sourceMappingURL=tristarMpptUtil.js.map

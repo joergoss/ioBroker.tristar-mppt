@@ -4,13 +4,13 @@
 declare global {
 	namespace ioBroker {
 		interface AdapterConfig {
-			option1: boolean;
-			option2: string;
 			hostname: string;
 			port: number;
 			unitId: number;
 			interval: number;
 			installedWP: number;
+			enableControlWrites: boolean;
+			enableEepromWrites: boolean;
 		}
 	}
 }
