@@ -287,6 +287,8 @@ Nach dem Upgrade sind RAM-/Coil- und EEPROM-Schreibzugriffe standardmäßig deak
 Weitere Nachweise und Betriebsdokumentation:
 
 - [Auditbericht 2026-11-16](docs/audit-2026-11-16.md)
+- [Hardware-Abschlussvalidierung 2026-11-17](docs/hardware-validation-2026-11-17.md)
+- [Analyse der Solar-Ausreißer (#2)](docs/solar-outlier-analysis.md)
 - [Deployment- und Rollback-Runbook](docs/deployment.md)
 
 ```bash
