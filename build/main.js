@@ -38,7 +38,6 @@ var __importStar = (this && this.__importStar) || (function () {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.TristarMppt = void 0;
 const utils = __importStar(require("@iobroker/adapter-core"));
-const node_util_1 = require("node:util");
 const config_1 = require("./config");
 const tristarMpptTCPModbus_1 = require("./tristarMppt/tristarMpptTCPModbus");
 const tristarMpptUtil_1 = require("./tristarMppt/tristarMpptUtil");
@@ -78,7 +77,7 @@ class TristarMppt extends utils.Adapter {
             (0, config_1.validateConfig)(this.config);
         }
         catch (error) {
-            this.log.error(`Invalid configuration: ${this.errorText(error)}`);
+            this.log.error(`Invalid configuration: ${(0, tristarMpptUtil_1.errorText)(error)}`);
             return;
         }
         if (this.unloaded) {
@@ -163,7 +162,7 @@ class TristarMppt extends utils.Adapter {
         catch (error) {
             if (this.mainLoopRunning) {
                 await this.safeSetConnectionState(false);
-                this.log.error(`Could not read TriStar data: ${this.errorText(error)}`);
+                this.log.error(`Could not read TriStar data: ${(0, tristarMpptUtil_1.errorText)(error)}`);
             }
             return false;
         }
@@ -189,7 +188,7 @@ class TristarMppt extends utils.Adapter {
                     this.lastStateValues.set(key, value);
                 }
                 catch (error) {
-                    this.log.error(`Could not publish ${key}: ${this.errorText(error)}`);
+                    this.log.error(`Could not publish ${key}: ${(0, tristarMpptUtil_1.errorText)(error)}`);
                 }
             }
         }
@@ -219,7 +218,7 @@ class TristarMppt extends utils.Adapter {
             clear();
             if (this.mainLoopRunning) {
                 this.nextStaticRead = Date.now() + 60000;
-                this.log.error(`Could not read static TriStar registers: ${this.errorText(error)}`);
+                this.log.error(`Could not read static TriStar registers: ${(0, tristarMpptUtil_1.errorText)(error)}`);
             }
         });
     }
@@ -241,7 +240,7 @@ class TristarMppt extends utils.Adapter {
             clear();
             if (this.mainLoopRunning) {
                 this.nextCoilRead = Date.now() + 60000;
-                this.log.error(`Could not read TriStar coil states: ${this.errorText(error)}`);
+                this.log.error(`Could not read TriStar coil states: ${(0, tristarMpptUtil_1.errorText)(error)}`);
             }
         });
     }
@@ -270,7 +269,7 @@ class TristarMppt extends utils.Adapter {
             await this.setConnectionState(connected);
         }
         catch (error) {
-            this.log.error(`Could not update info.connection: ${this.errorText(error)}`);
+            this.log.error(`Could not update info.connection: ${(0, tristarMpptUtil_1.errorText)(error)}`);
         }
     }
     onUnload(callback) {
@@ -391,19 +390,8 @@ class TristarMppt extends utils.Adapter {
             this.log.warn(`Ignoring write to read-only state ${key}`);
         }
         catch (error) {
-            this.log.error(`Could not write ${key}: ${this.errorText(error)}`);
+            this.log.error(`Could not write ${key}: ${(0, tristarMpptUtil_1.errorText)(error)}`);
         }
-    }
-    errorText(error) {
-        if (error instanceof Error) {
-            return error.stack || error.message;
-        }
-        if (typeof error === "string") {
-            return error;
-        }
-        // jsmodbus may reject with plain objects from another realm. String(error)
-        // would only say "[object Object]"; inspect also shows non-enumerable details.
-        return (0, node_util_1.inspect)(error, { depth: 4, breakLength: 160 });
     }
 }
 exports.TristarMppt = TristarMppt;

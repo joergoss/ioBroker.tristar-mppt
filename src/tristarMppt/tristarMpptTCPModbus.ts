@@ -5,7 +5,7 @@ import * as net from "net";
 import { SolarSnapshotFilter } from "./solarSnapshotFilter";
 import { TristarHoldingRegisterArray, TristarDataEntry, TristarModbusData, TristarModel, TristarWriteSingleCoil, TristarWriteSingleHoldingRegister, TristarScale } from "./tristarMpptModel";
 import { TristarStaticModel } from "./tristarMpptStaticModel";
-import { signedToInteger } from "./tristarMpptUtil";
+import { errorText, signedToInteger } from "./tristarMpptUtil";
 
 const SOCKET_TIMEOUT_MS = 10_000;
 const STATIC_REGISTER_BLOCKS = [
@@ -150,7 +150,7 @@ export class TristarMpptTCPModbus {
 				const values = await this.enqueue(() => this.readRegisterBlock(adapterConfig, block.start, block.count));
 				values.forEach((value, index) => registers.set(block.start + index, value));
 			} catch (error) {
-				errors.push(`0x${block.start.toString(16)}: ${error instanceof Error ? error.message : String(error)}`);
+				errors.push(`0x${block.start.toString(16)}: ${errorText(error)}`);
 			}
 		}
 		if (writeVersion !== this.eepromWriteVersion || readScaleSignature !== this.scaleSignature) {
@@ -180,7 +180,7 @@ export class TristarMpptTCPModbus {
 					entry.value = null;
 					entry.initialized = false;
 					entry.rawValue = undefined;
-					errors.push(`${entry.descr}: ${error instanceof Error ? error.message : String(error)}`);
+					errors.push(`${entry.descr}: ${errorText(error)}`);
 				}
 			}
 		}
@@ -223,7 +223,7 @@ export class TristarMpptTCPModbus {
 				try {
 					after = await this.readRegisterBlock(adapterConfig, command.register, 1);
 				} catch (error) {
-					throw new Error(`EEPROM write was sent but readback failed; do not retry blindly: ${error instanceof Error ? error.message : String(error)}`);
+					throw new Error(`EEPROM write was sent but readback failed; do not retry blindly: ${errorText(error)}`);
 				}
 				if (after[0] !== command.value) {
 					throw new Error(`EEPROM readback mismatch at 0x${command.register.toString(16)}: wrote ${command.value}, read ${after[0]}`);

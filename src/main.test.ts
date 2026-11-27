@@ -167,12 +167,46 @@ describe("adapter error reporting and retry", () => {
 		const error = { code: 11 };
 		adapter.tristar.readHoldingRegister.rejects(error);
 
-		await adapter.updateStates();
+		const success = await adapter.updateStates();
 
+		expect(success).to.equal(false);
 		const message = adapter.log.error.firstCall.args[0];
 		expect(message).to.contain("Could not read TriStar data:");
 		expect(message).to.contain("code: 11");
 		expect(message).not.to.contain("[object Object]");
+	});
+
+	it("reports a successful read as a successful poll", async () => {
+		const adapter = createAdapterHarness();
+		adapter.tristar.tristarData = {
+			"batt.V": { value: 12, readRegister: sinon.stub() },
+		};
+
+		expect(await adapter.updateStates()).to.equal(true);
+	});
+
+	it("drives the backoff from real read failures and resets it after success", async () => {
+		const adapter = createAdapterHarness();
+		adapter.config.interval = 1;
+		adapter.tristar.tristarData = {
+			"batt.V": { value: 12, readRegister: sinon.stub() },
+		};
+		const outcomes = [false, false, false, false, false, false, false, true];
+		adapter.tristar.readHoldingRegister.callsFake(async () => {
+			if (!outcomes.shift()) {
+				throw new Error("offline");
+			}
+		});
+		const delays: number[] = [];
+		adapter.sleep = sinon.stub().callsFake(async (ms: number) => {
+			delays.push(ms);
+			if (outcomes.length === 0) adapter.mainLoopRunning = false;
+		});
+
+		await adapter.mainLoop();
+
+		expect(delays).to.deep.equal([1000, 2000, 4000, 8000, 16000, 32000, 60000, 1000]);
+		expect(adapter.retryDelayMs).to.equal(1000);
 	});
 
 	it("uses bounded exponential backoff and resets it after a successful poll", async () => {

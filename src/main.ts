@@ -3,11 +3,10 @@
  */
 
 import * as utils from "@iobroker/adapter-core";
-import { inspect } from "node:util";
 import { validateConfig } from "./config";
 import { TristarDataEntry, TristarPropertyType, TristarWriteData } from "./tristarMppt/tristarMpptModel";
 import { TristarMpptTCPModbus } from "./tristarMppt/tristarMpptTCPModbus";
-import { splitIdFromAdapter } from "./tristarMppt/tristarMpptUtil";
+import { errorText, splitIdFromAdapter } from "./tristarMppt/tristarMpptUtil";
 
 const STATIC_READ_INTERVAL_MS = 300_000;
 const COIL_READ_INTERVAL_MS = 5_000;
@@ -54,7 +53,7 @@ export class TristarMppt extends utils.Adapter {
 		try {
 			validateConfig(this.config);
 		} catch (error) {
-			this.log.error(`Invalid configuration: ${this.errorText(error)}`);
+			this.log.error(`Invalid configuration: ${errorText(error)}`);
 			return;
 		}
 
@@ -146,7 +145,7 @@ export class TristarMppt extends utils.Adapter {
 		} catch (error) {
 			if (this.mainLoopRunning) {
 				await this.safeSetConnectionState(false);
-				this.log.error(`Could not read TriStar data: ${this.errorText(error)}`);
+				this.log.error(`Could not read TriStar data: ${errorText(error)}`);
 			}
 			return false;
 		}
@@ -173,7 +172,7 @@ export class TristarMppt extends utils.Adapter {
 					await this.writeState(key, { val: value, ack: true });
 					this.lastStateValues.set(key, value);
 				} catch (error) {
-					this.log.error(`Could not publish ${key}: ${this.errorText(error)}`);
+					this.log.error(`Could not publish ${key}: ${errorText(error)}`);
 				}
 			}
 		}
@@ -205,7 +204,7 @@ export class TristarMppt extends utils.Adapter {
 			clear();
 			if (this.mainLoopRunning) {
 				this.nextStaticRead = Date.now() + 60_000;
-				this.log.error(`Could not read static TriStar registers: ${this.errorText(error)}`);
+				this.log.error(`Could not read static TriStar registers: ${errorText(error)}`);
 			}
 		});
 	}
@@ -228,7 +227,7 @@ export class TristarMppt extends utils.Adapter {
 			clear();
 			if (this.mainLoopRunning) {
 				this.nextCoilRead = Date.now() + 60_000;
-				this.log.error(`Could not read TriStar coil states: ${this.errorText(error)}`);
+				this.log.error(`Could not read TriStar coil states: ${errorText(error)}`);
 			}
 		});
 	}
@@ -258,7 +257,7 @@ export class TristarMppt extends utils.Adapter {
 		try {
 			await this.setConnectionState(connected);
 		} catch (error) {
-			this.log.error(`Could not update info.connection: ${this.errorText(error)}`);
+			this.log.error(`Could not update info.connection: ${errorText(error)}`);
 		}
 	}
 
@@ -383,20 +382,8 @@ export class TristarMppt extends utils.Adapter {
 			}
 			this.log.warn(`Ignoring write to read-only state ${key}`);
 		} catch (error) {
-			this.log.error(`Could not write ${key}: ${this.errorText(error)}`);
+			this.log.error(`Could not write ${key}: ${errorText(error)}`);
 		}
-	}
-
-	private errorText(error: unknown): string {
-		if (error instanceof Error) {
-			return error.stack || error.message;
-		}
-		if (typeof error === "string") {
-			return error;
-		}
-		// jsmodbus may reject with plain objects from another realm. String(error)
-		// would only say "[object Object]"; inspect also shows non-enumerable details.
-		return inspect(error, { depth: 4, breakLength: 160 });
 	}
 }
 

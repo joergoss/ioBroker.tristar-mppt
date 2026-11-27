@@ -262,6 +262,85 @@ describe("partial static register support", () => {
 	});
 });
 
+describe("diagnostic formatting for non-standard read errors", () => {
+	it("renders a plain-object block failure with its details", async () => {
+		const client = new TristarMpptTCPModbus() as any;
+		const registers = new Array<number>(92).fill(0);
+		registers[0] = 80;
+		registers[2] = 80;
+		client.lastHoldingRegisters = registers;
+		client.readRegisterBlock = async (_config: ioBroker.AdapterConfig, start: number) => {
+			if (start === 0x1000) {
+				throw { code: 11 };
+			}
+			return [0];
+		};
+
+		try {
+			await client.readStaticRegisters({ installedWP: 0 } as ioBroker.AdapterConfig);
+			expect.fail("static read should report the failed block");
+		} catch (error) {
+			const message = (error as Error).message;
+			expect(message).to.contain("0x1000");
+			expect(message).to.contain("code: 11");
+			expect(message).not.to.contain("[object Object]");
+		}
+	});
+
+	it("renders a plain-object decode failure with its details", () => {
+		const client = new TristarMpptTCPModbus();
+		const registers = new Array<number>(92).fill(0);
+		registers[0] = 80;
+		registers[2] = 80;
+		client.lastHoldingRegisters = registers;
+		const entry = client.tristarData["eeprom.charge.absorptionV"];
+		entry.readRegister = () => {
+			throw { code: 11 };
+		};
+
+		const errors = client.updateStaticData(new Map([[0xe000, 4096]]), { installedWP: 0 } as ioBroker.AdapterConfig);
+		const messages = errors.join("; ");
+
+		expect(messages).to.contain(entry.descr);
+		expect(messages).to.contain("code: 11");
+		expect(messages).not.to.contain("[object Object]");
+	});
+
+	it("renders a plain-object EEPROM readback failure with its details", async () => {
+		const client = new TristarMpptTCPModbus() as any;
+		const registers = new Array<number>(92).fill(0);
+		registers[0] = 80;
+		registers[2] = 80;
+		await client.updateTristarData(registers, { installedWP: 0 } as ioBroker.AdapterConfig);
+		client.lastHoldingRegisters = registers;
+		let reads = 0;
+		client.readRegisterBlock = async () => {
+			reads++;
+			if (reads === 1) {
+				return [4096];
+			}
+			throw { code: 11 };
+		};
+		client.connect = async (_config: ioBroker.AdapterConfig, callback: (modbusClient: any) => Promise<void>) =>
+			callback({ writeSingleRegister: async () => undefined });
+
+		try {
+			await client.writeEepromRegister(
+				{ installedWP: 0 } as ioBroker.AdapterConfig,
+				{ register: 0xe000, value: 8192 },
+				4096,
+				client.scaleSignature,
+			);
+			expect.fail("failed readback should reject");
+		} catch (error) {
+			const message = (error as Error).message;
+			expect(message).to.contain("do not retry blindly");
+			expect(message).to.contain("code: 11");
+			expect(message).not.to.contain("[object Object]");
+		}
+	});
+});
+
 describe("local Modbus TCP integration", () => {
 	it("reads 92 registers through the public response API and writes registers/coils", async () => {
 		const holding = Buffer.alloc(92 * 2);

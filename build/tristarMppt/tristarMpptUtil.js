@@ -11,6 +11,8 @@ exports.resolveAlarmBitfield = resolveAlarmBitfield;
 exports.byteString = byteString;
 exports.wordString = wordString;
 exports.splitIdFromAdapter = splitIdFromAdapter;
+exports.errorText = errorText;
+const node_util_1 = require("node:util");
 // helper function to convert signed value to integer
 function signedToInteger(value) {
     if ((value & 0x8000) > 0) {
@@ -165,5 +167,16 @@ function splitIdFromAdapter(str) {
     const start = 2;
     const tokens = str.split(delimiter).slice(start);
     return tokens.join(delimiter);
+}
+function errorText(error) {
+    if (error instanceof Error) {
+        return error.stack || error.message;
+    }
+    if (typeof error === "string") {
+        return error;
+    }
+    // jsmodbus may reject with plain objects from another realm. String(error)
+    // would only say "[object Object]"; inspect also shows non-enumerable details.
+    return (0, node_util_1.inspect)(error, { depth: 4, breakLength: 160 });
 }
 //# sourceMappingURL=tristarMpptUtil.js.map
