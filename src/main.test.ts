@@ -31,6 +31,7 @@ function createAdapterHarness(): any {
 	adapter.log = { debug: sinon.stub(), error: sinon.stub(), warn: sinon.stub() };
 	adapter.setStateAsync = sinon.stub().resolves();
 	adapter.mainLoopRunning = true;
+	adapter.retryDelayMs = 1000;
 	adapter.lastStateValues = new Map();
 	adapter.stateWriteQueues = new Map();
 	return adapter;
@@ -157,6 +158,38 @@ describe("adapter state updates", () => {
 		await adapter.updateStates();
 
 		expect(adapter.log.error.called).to.equal(true);
+	});
+});
+
+describe("adapter error reporting and retry", () => {
+	it("formats non-standard modbus errors without losing their details", async () => {
+		const adapter = createAdapterHarness();
+		const error = { code: 11 };
+		adapter.tristar.readHoldingRegister.rejects(error);
+
+		await adapter.updateStates();
+
+		const message = adapter.log.error.firstCall.args[0];
+		expect(message).to.contain("Could not read TriStar data:");
+		expect(message).to.contain("code: 11");
+		expect(message).not.to.contain("[object Object]");
+	});
+
+	it("uses bounded exponential backoff and resets it after a successful poll", async () => {
+		const adapter = createAdapterHarness();
+		adapter.config.interval = 1;
+		const outcomes = [false, false, false, false, false, false, false, true];
+		adapter.updateStates = sinon.stub().callsFake(async () => outcomes.shift() ?? true);
+		const delays: number[] = [];
+		adapter.sleep = sinon.stub().callsFake(async (ms: number) => {
+			delays.push(ms);
+			if (outcomes.length === 0) adapter.mainLoopRunning = false;
+		});
+
+		await adapter.mainLoop();
+
+		expect(delays).to.deep.equal([1000, 2000, 4000, 8000, 16000, 32000, 60000, 1000]);
+		expect(adapter.retryDelayMs).to.equal(1000);
 	});
 });
 

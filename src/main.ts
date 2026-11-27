@@ -3,6 +3,7 @@
  */
 
 import * as utils from "@iobroker/adapter-core";
+import { inspect } from "node:util";
 import { validateConfig } from "./config";
 import { TristarDataEntry, TristarPropertyType, TristarWriteData } from "./tristarMppt/tristarMpptModel";
 import { TristarMpptTCPModbus } from "./tristarMppt/tristarMpptTCPModbus";
@@ -17,10 +18,11 @@ export class TristarMppt extends utils.Adapter {
 	private timeoutRef: ReturnType<typeof setTimeout> | undefined;
 	private wakeUp: (() => void) | undefined;
 	private connectionState: boolean | undefined;
-	private activeUpdate: Promise<void> | undefined;
+	private activeUpdate: Promise<boolean> | undefined;
 	private nextStaticRead = 0;
 	private nextCoilRead = 0;
 	private unloaded = false;
+	private retryDelayMs = 1000;
 	private staticReadPromise: Promise<void> | undefined;
 	private coilReadPromise: Promise<void> | undefined;
 	private readonly stateWriteQueues = new Map<string, Promise<void>>();
@@ -126,7 +128,7 @@ export class TristarMppt extends utils.Adapter {
 		await this.extendObjectAsync(key, { common });
 	}
 
-	private updateStates(): Promise<void> {
+	private updateStates(): Promise<boolean> {
 		const update = this.performUpdateStates();
 		this.activeUpdate = update;
 		const clear = (): void => {
@@ -138,7 +140,7 @@ export class TristarMppt extends utils.Adapter {
 		return update;
 	}
 
-	private async performUpdateStates(): Promise<void> {
+	private async performUpdateStates(): Promise<boolean> {
 		try {
 			await this.tristar.readHoldingRegister(this.config);
 		} catch (error) {
@@ -146,11 +148,11 @@ export class TristarMppt extends utils.Adapter {
 				await this.safeSetConnectionState(false);
 				this.log.error(`Could not read TriStar data: ${this.errorText(error)}`);
 			}
-			return;
+			return false;
 		}
 
 		if (!this.mainLoopRunning) {
-			return;
+			return false;
 		}
 		this.log.debug(`Raw holding registers: ${JSON.stringify(this.tristar.lastHoldingRegisters)}`);
 		await this.safeSetConnectionState(true);
@@ -159,7 +161,7 @@ export class TristarMppt extends utils.Adapter {
 		// coil refreshes must never delay this poll.
 		for (const [key, entry] of Object.entries(this.tristar.tristarData)) {
 			if (!this.mainLoopRunning) {
-				return;
+				return false;
 			}
 			if (!entry.readRegister && !entry.readCoil) {
 				continue;
@@ -182,6 +184,7 @@ export class TristarMppt extends utils.Adapter {
 		if (this.mainLoopRunning && Date.now() >= this.nextCoilRead) {
 			this.refreshCoilStates();
 		}
+		return true;
 	}
 
 	private refreshStaticRegisters(): void {
@@ -293,9 +296,16 @@ export class TristarMppt extends utils.Adapter {
 
 	private async mainLoop(): Promise<void> {
 		while (this.mainLoopRunning) {
-			await this.updateStates();
-			if (this.mainLoopRunning) {
+			const success = await this.updateStates();
+			if (!this.mainLoopRunning) {
+				break;
+			}
+			if (success) {
+				this.retryDelayMs = 1000;
 				await this.sleep(this.config.interval * 1000);
+			} else {
+				await this.sleep(this.retryDelayMs);
+				this.retryDelayMs = Math.min(this.retryDelayMs * 2, 60_000);
 			}
 		}
 	}
@@ -381,7 +391,12 @@ export class TristarMppt extends utils.Adapter {
 		if (error instanceof Error) {
 			return error.stack || error.message;
 		}
-		return String(error);
+		if (typeof error === "string") {
+			return error;
+		}
+		// jsmodbus may reject with plain objects from another realm. String(error)
+		// would only say "[object Object]"; inspect also shows non-enumerable details.
+		return inspect(error, { depth: 4, breakLength: 160 });
 	}
 }
 

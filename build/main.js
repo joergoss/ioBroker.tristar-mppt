@@ -38,6 +38,7 @@ var __importStar = (this && this.__importStar) || (function () {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.TristarMppt = void 0;
 const utils = __importStar(require("@iobroker/adapter-core"));
+const node_util_1 = require("node:util");
 const config_1 = require("./config");
 const tristarMpptTCPModbus_1 = require("./tristarMppt/tristarMpptTCPModbus");
 const tristarMpptUtil_1 = require("./tristarMppt/tristarMpptUtil");
@@ -54,6 +55,7 @@ class TristarMppt extends utils.Adapter {
         this.nextStaticRead = 0;
         this.nextCoilRead = 0;
         this.unloaded = false;
+        this.retryDelayMs = 1000;
         this.stateWriteQueues = new Map();
         this.lastStateValues = new Map();
         this.on("ready", this.onReady.bind(this));
@@ -163,10 +165,10 @@ class TristarMppt extends utils.Adapter {
                 await this.safeSetConnectionState(false);
                 this.log.error(`Could not read TriStar data: ${this.errorText(error)}`);
             }
-            return;
+            return false;
         }
         if (!this.mainLoopRunning) {
-            return;
+            return false;
         }
         this.log.debug(`Raw holding registers: ${JSON.stringify(this.tristar.lastHoldingRegisters)}`);
         await this.safeSetConnectionState(true);
@@ -174,7 +176,7 @@ class TristarMppt extends utils.Adapter {
         // coil refreshes must never delay this poll.
         for (const [key, entry] of Object.entries(this.tristar.tristarData)) {
             if (!this.mainLoopRunning) {
-                return;
+                return false;
             }
             if (!entry.readRegister && !entry.readCoil) {
                 continue;
@@ -197,6 +199,7 @@ class TristarMppt extends utils.Adapter {
         if (this.mainLoopRunning && Date.now() >= this.nextCoilRead) {
             this.refreshCoilStates();
         }
+        return true;
     }
     refreshStaticRegisters() {
         if (this.staticReadPromise) {
@@ -303,9 +306,17 @@ class TristarMppt extends utils.Adapter {
     }
     async mainLoop() {
         while (this.mainLoopRunning) {
-            await this.updateStates();
-            if (this.mainLoopRunning) {
+            const success = await this.updateStates();
+            if (!this.mainLoopRunning) {
+                break;
+            }
+            if (success) {
+                this.retryDelayMs = 1000;
                 await this.sleep(this.config.interval * 1000);
+            }
+            else {
+                await this.sleep(this.retryDelayMs);
+                this.retryDelayMs = Math.min(this.retryDelayMs * 2, 60000);
             }
         }
     }
@@ -387,7 +398,12 @@ class TristarMppt extends utils.Adapter {
         if (error instanceof Error) {
             return error.stack || error.message;
         }
-        return String(error);
+        if (typeof error === "string") {
+            return error;
+        }
+        // jsmodbus may reject with plain objects from another realm. String(error)
+        // would only say "[object Object]"; inspect also shows non-enumerable details.
+        return (0, node_util_1.inspect)(error, { depth: 4, breakLength: 160 });
     }
 }
 exports.TristarMppt = TristarMppt;
