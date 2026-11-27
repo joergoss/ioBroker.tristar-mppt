@@ -26,7 +26,7 @@ Den Adapter installieren, eine Instanz anlegen und folgende Einstellungen vor de
 | `hostname` | leer | Hostname oder IP-Adresse des Controllers; Pflichtfeld |
 | `port` | `502` | Modbus-TCP-Port, 1–65535 |
 | `unitId` | `1` | Modbus Unit-ID, 1–247 |
-| `interval` | `1` | Abfrageintervall in Sekunden, mindestens 1 |
+| `interval` | `1` | Abfrageintervall erfolgreicher Polls in Sekunden, mindestens 1; nach Lesefehlern gilt ein Backoff von 1–60 s |
 | `installedWP` | `0` | Installierte PV-Leistung in Wp; `0` deaktiviert die Prozentberechnung |
 | `enableControlWrites` | `false` | Opt-in für RAM-Control- und Coil-Kommandos inklusive Slave-Control, Clear und Reset |
 | `enableEepromWrites` | `false` | Zusätzliches, unabhängiges Opt-in für die abgesicherte EEPROM-Ladeeinstellungen-Allowlist |
@@ -271,7 +271,8 @@ Nicht als normale Adapterfunktionen freigeschaltet sind destruktive Clear-/Reset
 - `info.connection=false`: Konfiguration oder RAM-Kommunikation ist fehlerhaft bzw. es gab noch keinen erfolgreichen Poll.
 - Fehler beim optionalen statischen EEPROM-/Netzwerk-Read oder Coil-Status werden separat protokolliert und ändern nicht den nachweislich erfolgreichen RAM-Status. Auch ioBroker-State-DB-Fehler werden getrennt von der Geräteverbindung geloggt.
 - Der TriStar schließt die TCP-Verbindung nach einer Modbus-Antwort. Der Adapter baut daher für serialisierte Lese-/Schreiboperationen neue Verbindungen auf.
-- Socket- und Request-Fehler werden mit Fehlermeldung/Stack protokolliert. Zuletzt bekannte Messwerte bleiben erhalten; ihre Aktualität ist an `info.connection` zu prüfen.
+- Socket- und Request-Fehler werden mit Fehlermeldung/Stack bzw. den Details nicht standardisierter Fehlerobjekte protokolliert; `[object Object]` erscheint nicht mehr. Zuletzt bekannte Messwerte bleiben erhalten; ihre Aktualität ist an `info.connection` zu prüfen.
+- Nach einem fehlgeschlagenen RAM-Poll wiederholt der Adapter den Versuch mit exponentiell wachsendem Abstand (1 s, 2 s, 4 s … maximal 60 s) statt im konfigurierten Intervall. Nach einem erfolgreichen Poll gilt wieder `interval`; Polls überlappen sich nicht.
 - Auf Loglevel **debug** schreibt der Adapter die zuletzt empfangenen Rohregister. Diese Werte sind bei Ausreißern zusammen mit Zeitpunkt, betroffenem Datenpunkt und `installedWP` hilfreich.
 
 ## Migration von Version 0.0.2
@@ -318,6 +319,7 @@ Die Register-, Konvertierungs- und Kommandotests verwenden Fixtures bzw. Mocks u
 - (joerg) EEPROM-Reads/Fresh-Read/Readback auf FC04 korrigiert und Runtime-Kompatibilität mit Node.js 18 / js-controller 7.0 erhalten (#14, #15).
 - (joerg) Poll-/ACK-Writes pro Datenpunkt serialisiert und Skalierungswechsel invalidieren EEPROM-Werte bis zum Neu-Decode (#16, #17).
 - (joerg) Statische Refreshs blockieren RAM-Publishing nicht mehr; Unload während Initialisierung und Hintergrund-Reads ist sauber (#5).
+- (joerg) TriStar-/Modbus-Lesefehler liefern verwertbare Details statt `[object Object]`; fehlgeschlagene Polls laufen mit 1–60-s-Backoff statt im 1-s-Takt (#19).
 
 ### 0.0.2 (2022-01-15)
 - (joerg) initial release
