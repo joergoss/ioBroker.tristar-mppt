@@ -163,7 +163,7 @@ class TristarMpptTCPModbus {
                 values.forEach((value, index) => registers.set(block.start + index, value));
             }
             catch (error) {
-                errors.push(`0x${block.start.toString(16)}: ${error instanceof Error ? error.message : String(error)}`);
+                errors.push(`0x${block.start.toString(16)}: ${(0, tristarMpptUtil_1.errorText)(error)}`);
             }
         }
         if (writeVersion !== this.eepromWriteVersion || readScaleSignature !== this.scaleSignature) {
@@ -193,7 +193,7 @@ class TristarMpptTCPModbus {
                     entry.value = null;
                     entry.initialized = false;
                     entry.rawValue = undefined;
-                    errors.push(`${entry.descr}: ${error instanceof Error ? error.message : String(error)}`);
+                    errors.push(`${entry.descr}: ${(0, tristarMpptUtil_1.errorText)(error)}`);
                 }
             }
         }
@@ -233,7 +233,7 @@ class TristarMpptTCPModbus {
                     after = await this.readRegisterBlock(adapterConfig, command.register, 1);
                 }
                 catch (error) {
-                    throw new Error(`EEPROM write was sent but readback failed; do not retry blindly: ${error instanceof Error ? error.message : String(error)}`);
+                    throw new Error(`EEPROM write was sent but readback failed; do not retry blindly: ${(0, tristarMpptUtil_1.errorText)(error)}`);
                 }
                 if (after[0] !== command.value) {
                     throw new Error(`EEPROM readback mismatch at 0x${command.register.toString(16)}: wrote ${command.value}, read ${after[0]}`);

@@ -54,6 +54,7 @@ class TristarMppt extends utils.Adapter {
         this.nextStaticRead = 0;
         this.nextCoilRead = 0;
         this.unloaded = false;
+        this.retryDelayMs = 1000;
         this.stateWriteQueues = new Map();
         this.lastStateValues = new Map();
         this.on("ready", this.onReady.bind(this));
@@ -76,7 +77,7 @@ class TristarMppt extends utils.Adapter {
             (0, config_1.validateConfig)(this.config);
         }
         catch (error) {
-            this.log.error(`Invalid configuration: ${this.errorText(error)}`);
+            this.log.error(`Invalid configuration: ${(0, tristarMpptUtil_1.errorText)(error)}`);
             return;
         }
         if (this.unloaded) {
@@ -161,12 +162,12 @@ class TristarMppt extends utils.Adapter {
         catch (error) {
             if (this.mainLoopRunning) {
                 await this.safeSetConnectionState(false);
-                this.log.error(`Could not read TriStar data: ${this.errorText(error)}`);
+                this.log.error(`Could not read TriStar data: ${(0, tristarMpptUtil_1.errorText)(error)}`);
             }
-            return;
+            return false;
         }
         if (!this.mainLoopRunning) {
-            return;
+            return false;
         }
         this.log.debug(`Raw holding registers: ${JSON.stringify(this.tristar.lastHoldingRegisters)}`);
         await this.safeSetConnectionState(true);
@@ -174,7 +175,7 @@ class TristarMppt extends utils.Adapter {
         // coil refreshes must never delay this poll.
         for (const [key, entry] of Object.entries(this.tristar.tristarData)) {
             if (!this.mainLoopRunning) {
-                return;
+                return false;
             }
             if (!entry.readRegister && !entry.readCoil) {
                 continue;
@@ -187,7 +188,7 @@ class TristarMppt extends utils.Adapter {
                     this.lastStateValues.set(key, value);
                 }
                 catch (error) {
-                    this.log.error(`Could not publish ${key}: ${this.errorText(error)}`);
+                    this.log.error(`Could not publish ${key}: ${(0, tristarMpptUtil_1.errorText)(error)}`);
                 }
             }
         }
@@ -197,6 +198,7 @@ class TristarMppt extends utils.Adapter {
         if (this.mainLoopRunning && Date.now() >= this.nextCoilRead) {
             this.refreshCoilStates();
         }
+        return true;
     }
     refreshStaticRegisters() {
         if (this.staticReadPromise) {
@@ -216,7 +218,7 @@ class TristarMppt extends utils.Adapter {
             clear();
             if (this.mainLoopRunning) {
                 this.nextStaticRead = Date.now() + 60000;
-                this.log.error(`Could not read static TriStar registers: ${this.errorText(error)}`);
+                this.log.error(`Could not read static TriStar registers: ${(0, tristarMpptUtil_1.errorText)(error)}`);
             }
         });
     }
@@ -238,7 +240,7 @@ class TristarMppt extends utils.Adapter {
             clear();
             if (this.mainLoopRunning) {
                 this.nextCoilRead = Date.now() + 60000;
-                this.log.error(`Could not read TriStar coil states: ${this.errorText(error)}`);
+                this.log.error(`Could not read TriStar coil states: ${(0, tristarMpptUtil_1.errorText)(error)}`);
             }
         });
     }
@@ -267,7 +269,7 @@ class TristarMppt extends utils.Adapter {
             await this.setConnectionState(connected);
         }
         catch (error) {
-            this.log.error(`Could not update info.connection: ${this.errorText(error)}`);
+            this.log.error(`Could not update info.connection: ${(0, tristarMpptUtil_1.errorText)(error)}`);
         }
     }
     onUnload(callback) {
@@ -303,9 +305,17 @@ class TristarMppt extends utils.Adapter {
     }
     async mainLoop() {
         while (this.mainLoopRunning) {
-            await this.updateStates();
-            if (this.mainLoopRunning) {
+            const success = await this.updateStates();
+            if (!this.mainLoopRunning) {
+                break;
+            }
+            if (success) {
+                this.retryDelayMs = 1000;
                 await this.sleep(this.config.interval * 1000);
+            }
+            else {
+                await this.sleep(this.retryDelayMs);
+                this.retryDelayMs = Math.min(this.retryDelayMs * 2, 60000);
             }
         }
     }
@@ -380,14 +390,8 @@ class TristarMppt extends utils.Adapter {
             this.log.warn(`Ignoring write to read-only state ${key}`);
         }
         catch (error) {
-            this.log.error(`Could not write ${key}: ${this.errorText(error)}`);
+            this.log.error(`Could not write ${key}: ${(0, tristarMpptUtil_1.errorText)(error)}`);
         }
-    }
-    errorText(error) {
-        if (error instanceof Error) {
-            return error.stack || error.message;
-        }
-        return String(error);
     }
 }
 exports.TristarMppt = TristarMppt;

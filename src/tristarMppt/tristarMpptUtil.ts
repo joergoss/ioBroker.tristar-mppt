@@ -1,4 +1,6 @@
 
+import { inspect } from "node:util";
+
 // helper function to convert signed value to integer
 export function signedToInteger(value: number): number {
 	if ((value & 0x8000) > 0) {
@@ -165,5 +167,17 @@ export function splitIdFromAdapter(str: string): string  {
 	const start = 2
 	const tokens = str.split(delimiter).slice(start)
 	return tokens.join(delimiter);
+}
+
+export function errorText(error: unknown): string {
+	if (error instanceof Error) {
+		return error.stack || error.message;
+	}
+	if (typeof error === "string") {
+		return error;
+	}
+	// jsmodbus may reject with plain objects from another realm. String(error)
+	// would only say "[object Object]"; inspect also shows non-enumerable details.
+	return inspect(error, { depth: 4, breakLength: 160 });
 }
 
